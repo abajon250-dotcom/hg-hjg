@@ -108,7 +108,7 @@ async def init_db():
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_region ON qr_submissions(region)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_taken_by ON qr_submissions(taken_by)")
 
-        # Заполнение начальными данными (операторы, регионы, настройки)
+        # Заполнение начальными данными (если таблицы пусты)
         count = await conn.fetchval("SELECT COUNT(*) FROM operators")
         if count == 0:
             operators = [
@@ -435,6 +435,7 @@ async def get_user_stats(user_id: int, days: int = None) -> Dict:
                 WHERE user_id = $1
             """, user_id)
         else:
+            # Используем make_interval для целого числа дней
             row = await conn.fetchrow("""
                 SELECT
                     COUNT(*) as total,

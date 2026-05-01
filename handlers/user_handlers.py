@@ -312,7 +312,12 @@ async def show_my_numbers(callback: CallbackQuery):
     user_id = callback.from_user.id
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT DISTINCT phone FROM qr_submissions WHERE user_id = $1 ORDER BY submitted_at DESC", user_id)
+        rows = await conn.fetch("""
+            SELECT DISTINCT ON (phone) phone
+            FROM qr_submissions
+            WHERE user_id = $1
+            ORDER BY phone, submitted_at DESC
+        """, user_id)
     if not rows:
         await callback.answer("У вас нет сохранённых номеров.", show_alert=True)
         return
