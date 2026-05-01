@@ -530,3 +530,18 @@ async def get_referral_stats(user_id: int) -> Dict:
         user = await get_user(user_id)
         earnings = user['referral_earnings'] if user else 0
         return {"count": count, "earnings": earnings}
+
+async def get_total_users_count() -> int:
+    """Возвращает общее количество зарегистрированных пользователей."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM users")
+
+async def get_new_users_count(days: int = 1) -> int:
+    """Возвращает количество новых пользователей за последние N дней (по умолчанию 1)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT COUNT(*) FROM users WHERE registered_at >= NOW() - make_interval(days => $1)",
+            days
+        ) or 0

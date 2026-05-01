@@ -11,5 +11,4 @@ if REQUIRED_CHANNEL and not REQUIRED_CHANNEL.startswith("@"):
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    # Для локальной разработки можно использовать SQLite, но мы здесь ожидаем PostgreSQL
     raise ValueError("DATABASE_URL is not set in .env")

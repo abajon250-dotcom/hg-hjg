@@ -8,9 +8,11 @@ from datetime import datetime
 from config import BOT_TOKEN
 from db import init_db_pool, init_db, get_hold_submissions
 from utils import calculate_rank
-from handlers import user_handlers, admin_handlers, callback_handlers
+import user_handlers
+import admin_handlers
+import callback_handlers
 from middleware import SubscriptionMiddleware
-from handlers.callback_handlers import start_hold_timer
+from callback_handlers import start_hold_timer
 
 async def restore_holds(bot: Bot):
     submissions = await get_hold_submissions()
@@ -25,13 +27,15 @@ async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
-    # Инициализация пула соединений и создание таблиц
+    # Инициализация пула и таблиц
     await init_db_pool()
     await init_db()
 
+    # Мидлвари
     dp.message.middleware(SubscriptionMiddleware())
     dp.callback_query.middleware(SubscriptionMiddleware())
 
+    # Роутеры
     dp.include_router(user_handlers.router)
     dp.include_router(admin_handlers.router)
     dp.include_router(callback_handlers.router)

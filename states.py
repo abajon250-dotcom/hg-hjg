@@ -11,10 +11,3 @@ class AdminSetSlot(StatesGroup):
 
 class BroadcastState(StatesGroup):
     waiting_for_message = State()
-
-class AdminAddWorker(StatesGroup):
-    waiting_for_user_id = State()
-    waiting_for_permissions = State()
-
-class AdminDelWorker(StatesGroup):
-    waiting_for_user_id = State()

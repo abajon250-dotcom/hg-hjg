@@ -16,13 +16,12 @@ class SubscriptionMiddleware(BaseMiddleware):
         if not user:
             return await handler(event, data)
 
-        # Пропускаем старт, отмену и важные коллбэки
+        # Пропускаем команды /start, /cancel и кнопку "❌ Стоп"
         if isinstance(event, Message) and event.text and event.text.startswith(("/start", "/cancel", "❌ Стоп")):
             return await handler(event, data)
         if isinstance(event, CallbackQuery) and event.data in ("accept_terms", "check_subscription", "toggle_mode_from_sell"):
             return await handler(event, data)
 
-        # Проверка принятия условий
         if not await has_accepted_terms(user.id):
             if isinstance(event, Message):
                 await event.answer("❌ Сначала примите условия через /start")
@@ -30,12 +29,11 @@ class SubscriptionMiddleware(BaseMiddleware):
                 await event.answer("❌ Сначала примите условия через /start", show_alert=True)
             return
 
-        # Проверка подписки на канал (если указан)
         if REQUIRED_CHANNEL:
             try:
                 member = await data["bot"].get_chat_member(REQUIRED_CHANNEL, user.id)
                 if member.status in ("left", "kicked"):
-                    from keyboards.user_keyboards import subscription_check_button
+                    from user_keyboards import subscription_check_button
                     text = f"❌ Вы не подписаны на канал {REQUIRED_CHANNEL}. Подпишитесь и нажмите кнопку."
                     if isinstance(event, Message):
                         await event.answer(text, reply_markup=subscription_check_button())
@@ -44,10 +42,9 @@ class SubscriptionMiddleware(BaseMiddleware):
                     return
             except Exception as e:
                 logging.error(f"Subscription check error: {e}")
+                # Не блокируем, но предупреждаем
                 if isinstance(event, Message):
-                    await event.answer("❌ Не удалось проверить подписку. Повторите позже.")
-                elif isinstance(event, CallbackQuery):
-                    await event.answer("❌ Ошибка проверки подписки", show_alert=True)
+                    await event.answer("⚠️ Не удалось проверить подписку. Пожалуйста, убедитесь, что бот добавлен в канал.")
                 return
 
         return await handler(event, data)
