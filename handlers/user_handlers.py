@@ -197,7 +197,7 @@ async def receive_photo(message: Message, state: FSMContext):
     user = await get_user(user_id)
     username = user['username'] or str(user_id)
     qr_count_30d, _ = await get_user_qr_last_30_days(user_id)
-    _, bonus = calculate_rank(qr_count_30d)
+    _, bonus = calculate_rank(qr_count_30d)   # используем calculate_rank
     text = (
         f"🆕 Новая сдача eSIM\n"
         f"👤 Пользователь: @{username} (ID {user_id})\n"
@@ -216,7 +216,6 @@ async def receive_photo(message: Message, state: FSMContext):
 # ---------- Обработчик неправильного ввода в состоянии ожидания фото ----------
 @router.message(SubmitEsim.waiting_for_photo_and_phone)
 async def incorrect_input(message: Message, state: FSMContext):
-    # Если нажата кнопка "❌ Стоп" – сбрасываем состояние
     if message.text == "❌ Стоп":
         await state.clear()
         role = await get_user_role(message.from_user.id)
@@ -244,7 +243,7 @@ async def cmd_profile(message: Message):
         return
 
     qr_count_30d, unique_dates = await get_user_qr_last_30_days(user['user_id'])
-    rank_name, bonus = calculate_rank(qr_count_30d)
+    rank_name, bonus = calculate_rank(qr_count_30d)   # здесь тоже
 
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -290,6 +289,7 @@ async def cmd_profile(message: Message):
         f"Всего: {fmt(stats_total)}"
     )
     await message.answer(text, reply_markup=profile_keyboard())
+
 
 # ---------- Кнопка "Полезное" и подменю ----------
 @router.callback_query(F.data == "useful")
