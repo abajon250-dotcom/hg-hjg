@@ -476,7 +476,7 @@ async def get_top_users(limit: int = 10) -> List[Dict]:
         return [{"user_id": r['user_id'], "total_earned": r['total_earned']} for r in rows]
 
 # ------------------------------------------------------------
-# Регионы и топ операторов
+# Регионы и топ операторов, а также вспомогательные функции для user_handlers
 # ------------------------------------------------------------
 async def get_operator_top_regions(operator: str, period_days: int = 7) -> List[Dict]:
     pool = await get_pool()
@@ -492,6 +492,26 @@ async def get_operator_top_regions(operator: str, period_days: int = 7) -> List[
         """, operator, period_days)
         return [dict(row) for row in rows]
 
+async def get_most_popular_operator() -> str:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval("""
+            SELECT operator FROM qr_submissions
+            WHERE status = 'accepted' AND submitted_at >= NOW() - INTERVAL '30 days'
+            GROUP BY operator ORDER BY COUNT(*) DESC LIMIT 1
+        """) or "нет данных"
+
+async def get_low_stock_operators() -> List[str]:
+    operators = await get_operators()
+    low_stock = []
+    for op in operators:
+        if op['slot_limit'] != -1:
+            used = await count_active_bookings_for_operator(op['name'])
+            free = op['slot_limit'] - used
+            if free <= 2:
+                low_stock.append(op['name'])
+    return low_stock
+
 # ------------------------------------------------------------
 # Реферальная система
 # ------------------------------------------------------------
@@ -504,12 +524,18 @@ async def get_referral_percent(referrer_id: int) -> float:
             JOIN users u ON q.user_id = u.user_id
             WHERE u.referrer_id = $1 AND q.status = 'accepted' AND q.submitted_at >= NOW() - INTERVAL '30 days'
         """, referrer_id) or 0
-        if qr_count >= 200: return 4.0
-        elif qr_count >= 101: return 3.5
-        elif qr_count >= 61: return 3.0
-        elif qr_count >= 41: return 2.0
-        elif qr_count >= 21: return 1.0
-        else: return 0.0
+        if qr_count >= 200:
+            return 4.0
+        elif qr_count >= 101:
+            return 3.5
+        elif qr_count >= 61:
+            return 3.0
+        elif qr_count >= 41:
+            return 2.0
+        elif qr_count >= 21:
+            return 1.0
+        else:
+            return 0.0
 
 async def get_referral_stats(user_id: int) -> Dict:
     pool = await get_pool()
