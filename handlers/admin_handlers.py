@@ -8,22 +8,21 @@ from aiogram.fsm.context import FSMContext
 
 from config import ADMIN_IDS
 from db import (
-    get_pool, get_pending_submissions, get_operators, update_operator_prices,
-    update_operator_slot_limit, get_setting, set_setting, get_today_stats,
-    get_top_users, get_user, add_crypto_balance, reject_submission,
-    get_submission, accept_submission_now, get_user_qr_last_30_days,
-    accept_submission_from_hold, hold_submission, take_submission,
-    get_user_role, remove_worker, add_worker, get_workers, mark_submission_failed,
-    mark_submission_blocked
+    get_pool, get_pending_submissions, get_operators,
+    update_operator_prices, update_operator_slot_limit, get_setting, set_setting,
+    get_today_stats, get_top_users, get_user, add_crypto_balance,
+    reject_submission, get_submission, accept_submission_now,
+    get_user_qr_last_30_days, accept_submission_from_hold, hold_submission,
+    get_total_users_count, get_new_users_count
 )
-from states import AdminSetPrice, AdminSetSlot, BroadcastState, AdminAddWorker, AdminDelWorker
+from states import AdminSetPrice, AdminSetSlot, BroadcastState
 from utils import calculate_rank
-from user_keyboards import main_menu
-from admin_keyboards import (
+from keyboards.admin_keyboards import (
     admin_main_menu, pending_actions, operators_price_edit,
     operators_slot_edit, mode_buttons, confirm_clear, payout_list,
-    workers_menu, work_actions
+    take_submission_button, work_actions
 )
+from keyboards.user_keyboards import main_menu
 
 router = Router()
 hold_tasks = {}
