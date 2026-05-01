@@ -392,3 +392,37 @@ async def block_submission_callback(callback: CallbackQuery, bot: Bot):
     await bot.send_message(sub['user_id'], "🚫 Ваш номер заблокирован (не засчитан).")
     await callback.message.edit_caption(caption=f"🚫 Заявка #{submission_id} заблокирована (админ @{callback.from_user.username})", reply_markup=None)
     await callback.answer()
+
+@router.callback_query(F.data == "admin_users_stats")
+async def admin_users_stats(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет прав", show_alert=True)
+        return
+    total = await get_total_users_count()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        today = await conn.fetchval("SELECT COUNT(*) FROM users WHERE DATE(registered_at) = CURRENT_DATE")
+        week = await conn.fetchval("SELECT COUNT(*) FROM users WHERE registered_at >= NOW() - INTERVAL '7 days'")
+    text = f"👥 **Статистика пользователей**\n\n"
+    text += f"📊 Всего зарегистрировано: {total}\n"
+    text += f"✅ За сегодня: {today}\n"
+    text += f"📆 За 7 дней: {week}\n"
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=admin_main_menu())
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_users_stats")
+async def admin_users_stats(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет прав", show_alert=True)
+        return
+    total = await get_total_users_count()
+    today = await get_new_users_count(1)
+    week = await get_new_users_count(7)
+    text = (
+        f"👥 **Статистика пользователей**\n\n"
+        f"📊 Всего зарегистрировано: {total}\n"
+        f"✅ За сегодня: {today}\n"
+        f"📆 За 7 дней: {week}"
+    )
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=admin_main_menu())
+    await callback.answer()
