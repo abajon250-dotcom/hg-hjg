@@ -16,9 +16,6 @@ async def get_pool() -> asyncpg.Pool:
         await init_db_pool()
     return _pool
 
-# ------------------------------------------------------------
-# Инициализация таблиц (вызывается при старте)
-# ------------------------------------------------------------
 async def init_db():
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -61,7 +58,7 @@ async def init_db():
                 taken_at TIMESTAMP
             )
         """)
-        # Операторы
+        # Таблица операторов
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS operators (
                 name TEXT PRIMARY KEY,
@@ -72,7 +69,7 @@ async def init_db():
                 conditions TEXT DEFAULT ''
             )
         """)
-        # Бронирования
+        # Таблица бронирований
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS bookings (
                 id SERIAL PRIMARY KEY,
@@ -82,14 +79,14 @@ async def init_db():
                 used BOOLEAN DEFAULT FALSE
             )
         """)
-        # Настройки
+        # Таблица настроек
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
         """)
-        # Ежедневная статистика
+        # Таблица ежедневной статистики
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_stats (
                 date DATE PRIMARY KEY,
@@ -97,7 +94,7 @@ async def init_db():
                 total_earned REAL DEFAULT 0
             )
         """)
-        # Регионы
+        # Таблица регионов
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS regions (
                 code TEXT PRIMARY KEY,
@@ -111,8 +108,7 @@ async def init_db():
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_region ON qr_submissions(region)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_taken_by ON qr_submissions(taken_by)")
 
-        # Заполнение начальными данными, если таблицы пусты
-        # Операторы
+        # Заполнение начальными данными (операторы, регионы, настройки)
         count = await conn.fetchval("SELECT COUNT(*) FROM operators")
         if count == 0:
             operators = [
@@ -135,9 +131,7 @@ async def init_db():
                     VALUES ($1, $2, $3, $4, $5, $6)
                     ON CONFLICT (name) DO NOTHING
                 """, *op)
-        # Режим сдачи по умолчанию
         await conn.execute("INSERT INTO settings (key, value) VALUES ('sale_mode', 'hold') ON CONFLICT (key) DO NOTHING")
-        # Регионы
         count = await conn.fetchval("SELECT COUNT(*) FROM regions")
         if count == 0:
             regions = [
@@ -238,8 +232,7 @@ async def set_user_role(user_id: int, role: str):
 async def get_user_role(user_id: int) -> str:
     pool = await get_pool()
     async with pool.acquire() as conn:
-        role = await conn.fetchval("SELECT role FROM users WHERE user_id = $1", user_id)
-        return role or "user"
+        return await conn.fetchval("SELECT role FROM users WHERE user_id = $1", user_id) or "user"
 
 async def add_worker(user_id: int, permissions: str = ""):
     await set_user_role(user_id, "worker")
@@ -357,8 +350,7 @@ async def get_operator_price(operator: str, mode: str) -> Optional[float]:
     column = "price_hold" if mode == "hold" else "price_bh"
     pool = await get_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchval(f"SELECT {column} FROM operators WHERE name = $1", operator)
-        return row
+        return await conn.fetchval(f"SELECT {column} FROM operators WHERE name = $1", operator)
 
 async def update_operator_prices(operator: str, price_hold: float, price_bh: float):
     pool = await get_pool()
@@ -409,8 +401,7 @@ async def cancel_booking(booking_id: int):
 async def count_active_bookings_for_operator(operator: str) -> int:
     pool = await get_pool()
     async with pool.acquire() as conn:
-        count = await conn.fetchval("SELECT COUNT(*) FROM bookings WHERE operator = $1 AND used = FALSE", operator)
-        return count or 0
+        return await conn.fetchval("SELECT COUNT(*) FROM bookings WHERE operator = $1 AND used = FALSE", operator) or 0
 
 # ------------------------------------------------------------
 # Настройки
@@ -452,7 +443,7 @@ async def get_user_stats(user_id: int, days: int = None) -> Dict:
                     SUM(CASE WHEN status = 'rejected' AND reject_reason = 'noscan' THEN 1 ELSE 0 END) as noscan,
                     COALESCE(SUM(earned_amount), 0) as sum_earned
                 FROM qr_submissions
-                WHERE user_id = $1 AND submitted_at >= NOW() - ($2 || ' days')::INTERVAL
+                WHERE user_id = $1 AND submitted_at >= NOW() - make_interval(days => $2)
             """, user_id, days)
         return dict(row) if row else {"total":0, "accepted":0, "blocked":0, "noscan":0, "sum_earned":0.0}
 
@@ -476,7 +467,7 @@ async def get_top_users(limit: int = 10) -> List[Dict]:
         return [{"user_id": r['user_id'], "total_earned": r['total_earned']} for r in rows]
 
 # ------------------------------------------------------------
-# Регионы и топ операторов, а также вспомогательные функции для user_handlers
+# Регионы и топ операторов
 # ------------------------------------------------------------
 async def get_operator_top_regions(operator: str, period_days: int = 7) -> List[Dict]:
     pool = await get_pool()
@@ -485,7 +476,7 @@ async def get_operator_top_regions(operator: str, period_days: int = 7) -> List[
             SELECT r.name as region_name, COUNT(*) as cnt
             FROM qr_submissions q
             JOIN regions r ON q.region = r.code
-            WHERE q.operator = $1 AND q.status = 'accepted' AND q.submitted_at >= NOW() - ($2 || ' days')::INTERVAL
+            WHERE q.operator = $1 AND q.status = 'accepted' AND q.submitted_at >= NOW() - make_interval(days => $2)
             GROUP BY q.region, r.name
             ORDER BY cnt DESC
             LIMIT 5
@@ -524,18 +515,12 @@ async def get_referral_percent(referrer_id: int) -> float:
             JOIN users u ON q.user_id = u.user_id
             WHERE u.referrer_id = $1 AND q.status = 'accepted' AND q.submitted_at >= NOW() - INTERVAL '30 days'
         """, referrer_id) or 0
-        if qr_count >= 200:
-            return 4.0
-        elif qr_count >= 101:
-            return 3.5
-        elif qr_count >= 61:
-            return 3.0
-        elif qr_count >= 41:
-            return 2.0
-        elif qr_count >= 21:
-            return 1.0
-        else:
-            return 0.0
+        if qr_count >= 200: return 4.0
+        elif qr_count >= 101: return 3.5
+        elif qr_count >= 61: return 3.0
+        elif qr_count >= 41: return 2.0
+        elif qr_count >= 21: return 1.0
+        else: return 0.0
 
 async def get_referral_stats(user_id: int) -> Dict:
     pool = await get_pool()
