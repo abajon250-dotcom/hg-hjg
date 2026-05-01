@@ -399,14 +399,14 @@ async def admin_users_stats(callback: CallbackQuery):
         await callback.answer("Нет прав", show_alert=True)
         return
     total = await get_total_users_count()
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        today = await conn.fetchval("SELECT COUNT(*) FROM users WHERE DATE(registered_at) = CURRENT_DATE")
-        week = await conn.fetchval("SELECT COUNT(*) FROM users WHERE registered_at >= NOW() - INTERVAL '7 days'")
-    text = f"👥 **Статистика пользователей**\n\n"
-    text += f"📊 Всего зарегистрировано: {total}\n"
-    text += f"✅ За сегодня: {today}\n"
-    text += f"📆 За 7 дней: {week}\n"
+    today = await get_new_users_count(1)
+    week = await get_new_users_count(7)
+    text = (
+        f"👥 **Статистика пользователей**\n\n"
+        f"📊 Всего зарегистрировано: {total}\n"
+        f"✅ За сегодня: {today}\n"
+        f"📆 За 7 дней: {week}"
+    )
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=admin_main_menu())
     await callback.answer()
 
