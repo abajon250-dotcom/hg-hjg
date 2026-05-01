@@ -1,11 +1,9 @@
-# user_handlers.py (исправленный)
 import logging
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from datetime import datetime, timedelta
-import aiosqlite
 
 from config import ADMIN_IDS, REQUIRED_CHANNEL
 from db import (
@@ -15,20 +13,23 @@ from db import (
     get_user_qr_last_30_days, get_active_booking, cancel_booking,
     create_booking, get_user_stats, get_operator_top_regions,
     get_operator_conditions, get_referral_percent, get_referral_stats,
-    DATABASE, update_user_earnings, get_user_role
+    get_user_role, get_most_popular_operator, get_low_stock_operators,
+    get_pool
 )
 from states import SubmitEsim
 from utils import (
     validate_phone, normalize_phone, calculate_rank,
     calculate_volume_points, calculate_regularity_points, calculate_priority
 )
-from keyboards.user_keyboards import (
+from user_keyboards import (
     main_menu, profile_keyboard, booking_menu, back_button,
-    subscription_check_button, get_accept_terms_keyboard
+    subscription_check_button, get_accept_terms_keyboard, operators_for_booking
 )
+from admin_keyboards import pending_actions
 
 router = Router()
 
+# Текст условий (полный)
 TERMS_TEXT = """📄 **Условия работы:**
 
 • Формат сдачи: одним сообщением — QR‑код + номер телефона в формате "79999999999" для каждой eSIM.
@@ -42,6 +43,7 @@ TERMS_TEXT = """📄 **Условия работы:**
 ⚠ Условия могут меняться без уведомления.
 Без принятия условий доступ к функционалу закрыт."""
 
+# ---------- Старт и принятие условий ----------
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     args = message.text.split()
@@ -93,32 +95,14 @@ async def check_subscription_callback(callback: CallbackQuery, bot: Bot):
         logging.error(f"Check subscription error: {e}")
         await callback.answer("⚠️ Ошибка проверки подписки. Попробуйте позже.", show_alert=True)
 
-# ---------- Сдать ESIM ----------
+# ---------- Сдать ESIM (новый интерфейс) ----------
 @router.message(F.text == "📱 Сдать ESIM")
 async def cmd_sell_esim(message: Message):
     mode = await get_setting("sale_mode", "hold")
     operators = await get_operators()
 
-    async with aiosqlite.connect(DATABASE) as conn:
-        conn.row_factory = aiosqlite.Row
-        cur = await conn.execute("""
-            SELECT operator, COUNT(*) as cnt 
-            FROM qr_submissions 
-            WHERE status = 'accepted' AND submitted_at >= datetime('now', '-30 days')
-            GROUP BY operator 
-            ORDER BY cnt DESC LIMIT 1
-        """)
-        row = await cur.fetchone()
-        most_taken = row['operator'] if row else "нет данных"
-
-        low_stock = []
-        for op in operators:
-            if op['slot_limit'] != -1:
-                used = await count_active_bookings_for_operator(op['name'])
-                free = op['slot_limit'] - used
-                if free <= 2:
-                    low_stock.append(op['name'])
-        low_stock_text = ", ".join(low_stock) if low_stock else "все слоты свободны"
+    most_taken = await get_most_popular_operator()
+    low_stock = await get_low_stock_operators()
 
     mode_text = "БХ 🟢 (мгновенное начисление)" if mode == "bh" else "ХОЛД 🔴 (начисление через 30 минут)"
     mode_short = "БХ 🟢" if mode == "bh" else "ХОЛД 🔴"
@@ -133,7 +117,7 @@ async def cmd_sell_esim(message: Message):
         f"📱 **Сдать ESIM**\n\n"
         f"Режим сдачи: {mode_text}\n\n"
         f"🔥 Больше всего взято: {most_taken}\n"
-        f"⚠️ Минимальный остаток: {low_stock_text}\n\n"
+        f"⚠️ Минимальный остаток: {', '.join(low_stock) if low_stock else 'все слоты свободны'}\n\n"
         f"**Операторы и цены:**\n{operators_text}\n"
         f"Для смены режима нажмите кнопку ниже."
     )
@@ -172,6 +156,7 @@ async def select_operator(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+# ---------- Приём фото ----------
 @router.message(SubmitEsim.waiting_for_photo_and_phone, F.photo)
 async def receive_photo(message: Message, state: FSMContext):
     if not message.caption:
@@ -191,18 +176,20 @@ async def receive_photo(message: Message, state: FSMContext):
 
     mode = await get_setting("sale_mode", "hold")
     if mode == "hold":
-        async with aiosqlite.connect(DATABASE) as conn:
-            async with conn.execute(
-                "SELECT id FROM qr_submissions WHERE operator = ? AND phone = ? AND submitted_at >= datetime('now', '-30 minutes')",
-                (operator, phone)
-            ) as cur:
-                if await cur.fetchone():
-                    await message.answer("❌ Этот QR уже сдан недавно (режим ХОЛД). Подождите 30 минут.")
-                    await state.clear()
-                    return
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            existing = await conn.fetchval("""
+                SELECT id FROM qr_submissions
+                WHERE operator = $1 AND phone = $2 AND submitted_at >= NOW() - INTERVAL '30 minutes'
+            """, operator, phone)
+            if existing:
+                await message.answer("❌ Этот QR уже сдан недавно (режим ХОЛД). Подождите 30 минут.")
+                await state.clear()
+                return
 
     submission_id = await create_submission(user_id, operator, price, phone, photo_file_id, region)
-    await message.answer("✅ QR принят на проверку. Ожидайте решения админа.", reply_markup=main_menu(user_id in ADMIN_IDS, (await get_user_role(user_id)) == 'worker'))
+    role = await get_user_role(user_id)
+    await message.answer("✅ QR принят на проверку. Ожидайте решения админа.", reply_markup=main_menu(user_id in ADMIN_IDS, role == 'worker'))
     await state.clear()
 
     user = await get_user(user_id)
@@ -218,7 +205,6 @@ async def receive_photo(message: Message, state: FSMContext):
         f"🕒 Время: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
         f"ID заявки: {submission_id}"
     )
-    from keyboards.admin_keyboards import pending_actions
     for admin in ADMIN_IDS:
         try:
             await message.bot.send_photo(admin, photo_file_id, caption=text, reply_markup=pending_actions(submission_id))
@@ -226,29 +212,18 @@ async def receive_photo(message: Message, state: FSMContext):
             logging.error(f"Не удалось отправить уведомление админу {admin}: {e}")
 
 @router.message(SubmitEsim.waiting_for_photo_and_phone)
-async def incorrect_input(message: Message, state: FSMContext):
-    if message.text and "Стоп" in message.text:
-        await state.clear()
-        await message.answer("Действие отменено.", reply_markup=main_menu(...))
-        return
-    await message.answer("❌ Пожалуйста, отправьте **фото** с подписью-номером...")
+async def incorrect_input(message: Message):
+    await message.answer("❌ Пожалуйста, отправьте **фото** с подписью-номером. Для отмены нажмите ❌ Стоп")
 
 @router.message(F.text == "❌ Стоп")
 async def stop_action(message: Message, state: FSMContext):
     current_state = await state.get_state()
+    role = await get_user_role(message.from_user.id)
     if current_state:
         await state.clear()
-        role = await get_user_role(message.from_user.id)
-        await message.answer(
-            "✅ Действие отменено. Возврат в главное меню.",
-            reply_markup=main_menu(message.from_user.id in ADMIN_IDS, role == 'worker')
-        )
+        await message.answer("✅ Действие отменено. Возврат в главное меню.", reply_markup=main_menu(message.from_user.id in ADMIN_IDS, role == 'worker'))
     else:
-        role = await get_user_role(message.from_user.id)
-        await message.answer(
-            "🤷‍♂️ Нет активного действия для отмены.",
-            reply_markup=main_menu(message.from_user.id in ADMIN_IDS, role == 'worker')
-        )
+        await message.answer("🤷‍♂️ Нет активного действия для отмены.", reply_markup=main_menu(message.from_user.id in ADMIN_IDS, role == 'worker'))
 
 # ---------- Профиль ----------
 @router.message(F.text == "👤 Профиль")
@@ -261,12 +236,12 @@ async def cmd_profile(message: Message):
     qr_count_30d, unique_dates = await get_user_qr_last_30_days(user['user_id'])
     rank_name, bonus = calculate_rank(qr_count_30d)
 
-    async with aiosqlite.connect(DATABASE) as conn:
-        cur = await conn.execute(
-            "SELECT COUNT(*) FROM qr_submissions WHERE user_id = ? AND status='accepted' AND date(submitted_at) = date('now')",
-            (user['user_id'],)
-        )
-        qr_today = (await cur.fetchone())[0] or 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        qr_today = await conn.fetchval("""
+            SELECT COUNT(*) FROM qr_submissions
+            WHERE user_id = $1 AND status='accepted' AND DATE(submitted_at) = CURRENT_DATE
+        """, user['user_id']) or 0
 
     volume_points = calculate_volume_points(qr_today)
     regularity_points = calculate_regularity_points(len(unique_dates))
@@ -282,10 +257,12 @@ async def cmd_profile(message: Message):
         blocked = stats.get('blocked') or 0
         noscan = stats.get('noscan') or 0
         sum_earned = stats.get('sum_earned') or 0
-        return (f"✅ {accepted if accepted else 'пусто'} "
-                f"❌ {blocked if blocked else 'пусто'} "
-                f"🔥 {noscan if noscan else 'пусто'} "
-                f"💰 {f'{sum_earned:.2f}$' if sum_earned else 'пусто'}")
+        # Если значения 0, выводим "пусто"
+        acc_str = str(accepted) if accepted else "пусто"
+        blk_str = str(blocked) if blocked else "пусто"
+        nsc_str = str(noscan) if noscan else "пусто"
+        sum_str = f"{sum_earned:.2f}$" if sum_earned else "пусто"
+        return f"✅ {acc_str} ❌ {blk_str} 🔥 {nsc_str} 💰 {sum_str}"
 
     text = (
         f"👤 Профиль @{user['username']} · ID {user['user_id']}\n"
@@ -305,8 +282,7 @@ async def cmd_profile(message: Message):
     )
     await message.answer(text, reply_markup=profile_keyboard())
 
-
-# ---------- Полезное ----------
+# ---------- Кнопка "Полезное" и подменю ----------
 @router.callback_query(F.data == "useful")
 async def useful_menu(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -323,18 +299,18 @@ async def faq_section(callback: CallbackQuery):
     text = (
         "**FAQ – Часто задаваемые вопросы**\n\n"
         "• **Актуальный прайс (за каждую отдельную eSIM с холодом 30м)**\n"
-        "  - МТС (включая салон) — 18$ (бесход - 14$ за eSIM)\n"
-        "  - Сбер — 12$ (бесход - 10$ за eSIM)\n"
-        "  - Билайн — 15$ (бесход - 12$ за eSIM)\n"
-        "  - Т2 — 14$ (бесход - 10$ за eSIM)\n"
-        "  - ВТБ — 25$ (неоплаченный 20$)\n"
-        "  - Газпром — 28$ (неоплаченный 23$)\n"
-        "  - Тинькофф — 14$\n"
-        "  - Мегафон — 14$\n"
-        "  - Миранда — 11$\n"
+        "  - МТС (включая салон) — 14$ (бх - 8$ за eSIM)\n"
+        "  - Сбер — 10$ (бх - 7$ за eSIM)\n"
+        "  - Билайн — 13$ (бх - 9$ за eSIM)\n"
+        "  - Т2 — 12$ (бх - 8$ за eSIM)\n"
+        "  - ВТБ — 25$ (бх 18$)\n"
+        "  - Газпром — 28$ (бх 21$)\n"
+        "  - Тинькофф — 12$\n"
+        "  - Мегафон — 11$\n"
+        "  - Миранда — 12$\n"
         "  - Волна / 7телеком — 12$\n"
         "  - Йота — 14$\n\n"
-        "• **Мануалы по регистрации**:\n"
+        "• **Мануалы по регистрации:**\n"
         "  [SberMobile](https://t.me/c/3751926773/3/18)\n"
         "  [BeeLine](https://t.me/c/3751926773/3/19)\n"
         "  [MTS](https://t.me/c/3751926773/3/20)\n\n"
@@ -351,16 +327,16 @@ async def detailed_stats(callback: CallbackQuery):
     text = "📊 **Статистика по отчётным дням**\n\n"
     for days, label in periods:
         stats = await get_user_stats(user_id, days)
-        # Заменяем 0 на "пусто"
-        s_total = stats['total'] if stats['total'] > 0 else "пусто"
-        s_blocked = stats['blocked'] if stats['blocked'] > 0 else "пусто"
-        s_noscan = stats['noscan'] if stats['noscan'] > 0 else "пусто"
-        s_sum = f"{stats['sum_earned']:.2f}$" if stats['sum_earned'] > 0 else "пусто"
+        total = stats['total'] if stats['total'] else "пусто"
+        blocked = stats['blocked'] if stats['blocked'] else "пусто"
+        noscan = stats['noscan'] if stats['noscan'] else "пусто"
+        sum_earned = stats['sum_earned'] if stats['sum_earned'] else 0
+        sum_str = f"{sum_earned:.2f}$" if sum_earned else "пусто"
         text += f"• **{label}**\n"
-        text += f"  ✅ Сдано: {s_total}\n"
-        text += f"  🚫 Блоки: {s_blocked}\n"
-        text += f"  🔥 Несканы: {s_noscan}\n"
-        text += f"  💰 Сумма: {s_sum}\n\n"
+        text += f"  ✅ Сдано: {total}\n"
+        text += f"  🚫 Блоки: {blocked}\n"
+        text += f"  🔥 Несканы: {noscan}\n"
+        text += f"  💰 Сумма: {sum_str}\n\n"
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=back_button())
     await callback.answer()
 
@@ -377,7 +353,6 @@ async def operators_list(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("operator_stats:"))
 async def operator_stats(callback: CallbackQuery):
     operator = callback.data.split(":")[1]
-    # Топ-5 регионов за неделю
     top_regions = await get_operator_top_regions(operator, 7)
     conditions = await get_operator_conditions(operator)
     reg_text = "\n".join([f"{r['region_name']} — {r['cnt']} шт." for r in top_regions]) if top_regions else "Нет данных"
@@ -395,104 +370,48 @@ async def operator_stats(callback: CallbackQuery):
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     await callback.answer()
 
-# ---------- Мои номера, рефералы, история ----------
+# ---------- Мои номера ----------
 @router.callback_query(F.data == "my_numbers")
 async def show_my_numbers(callback: CallbackQuery):
     user_id = callback.from_user.id
-    async with aiosqlite.connect(DATABASE) as conn:
-        async with conn.execute(
-            "SELECT DISTINCT phone FROM qr_submissions WHERE user_id = ? ORDER BY submitted_at DESC",
-            (user_id,)
-        ) as cur:
-            rows = await cur.fetchall()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT DISTINCT phone FROM qr_submissions WHERE user_id = $1 ORDER BY submitted_at DESC", user_id)
     if not rows:
         await callback.answer("У вас нет сохранённых номеров.", show_alert=True)
         return
-    numbers = [row[0] for row in rows]
+    numbers = [row['phone'] for row in rows]
     text = "📞 Ваши номера:\n" + "\n".join(f"+{num}" for num in numbers)
     await callback.message.answer(text, reply_markup=back_button())
     await callback.answer()
 
-@router.callback_query(F.data == "ref_system")
-async def ref_system_callback(callback: CallbackQuery):
-    user = await get_user(callback.from_user.id)
-    if not user:
-        await callback.answer("Сначала /start")
-        return
-    ref_percent = await get_referral_percent(user['user_id'])
-    ref_stats = await get_referral_stats(user['user_id'])
-    bot_info = await callback.bot.get_me()
-    link = f"https://t.me/{bot_info.username}?start=ref_{user['user_id']}"
-    text = (
-        f"🌟 **Реферальная программа**\n\n"
-        f"Ваша ссылка: {link}\n\n"
-        f"👥 Приглашено пользователей: {ref_stats['count']}\n"
-        f"💰 Заработано с рефералов: ${user['referral_earnings']:.2f}\n"
-        f"📈 Текущий процент бонуса: {ref_percent}% от дохода рефералов\n\n"
-        f"**Как растёт процент?**\n"
-        f"0–20 QR рефералов → 0%\n"
-        f"21–40 → 1%\n"
-        f"41–60 → 2%\n"
-        f"61–100 → 3%\n"
-        f"101–199 → 3.5%\n"
-        f"200+ → 4%\n\n"
-        f"Запрос на вывод доступен от $10."
-    )
-    await callback.message.answer(text, reply_markup=back_button())
-    await callback.answer()
-
-@router.callback_query(F.data == "my_bot")
-async def my_bot_callback(callback: CallbackQuery):
-    text = (
-        "🤖 **Мой бот**\n\n"
-        "Подключите **своего Telegram-бота** для приёма номеров.\n\n"
-        "Это нужно для двух вещей:\n"
-        "- **Безопасность** – если основной бот временно заблокируют, вы продолжите работать через личного.\n"
-        "- **Стабильность** – личный бот отвечает быстрее и без задержек.\n\n"
-        "**Как подключить?**\n"
-        "1. Напишите [@BotFather](https://t.me/botfather) и создайте нового бота командой /newbot.\n"
-        "2. Скопируйте токен.\n"
-        "3. Пришлите токен сюда командой: `/deploy <токен>`\n"
-        "4. Администратор получит уведомление и свяжется с вами.\n\n"
-        "⚠️ Подключение – одним токеном, полная инструкция внутри раздела."
-    )
-    await callback.message.answer(text, parse_mode="Markdown", reply_markup=back_button())
-    await callback.answer()
-
+# ---------- История сдач ----------
 @router.callback_query(F.data == "history")
 async def show_history(callback: CallbackQuery):
     user_id = callback.from_user.id
-    async with aiosqlite.connect(DATABASE) as conn:
-        conn.row_factory = aiosqlite.Row
-        async with conn.execute("""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
             SELECT operator, price, status, submitted_at, earned_amount, reject_reason
             FROM qr_submissions
-            WHERE user_id = ?
+            WHERE user_id = $1
             ORDER BY submitted_at DESC
             LIMIT 10
-        """, (user_id,)) as cur:
-            rows = await cur.fetchall()
+        """, user_id)
     if not rows:
         await callback.answer("Нет сдач", show_alert=True)
         return
     text = "📜 **Последние 10 сдач**\n\n"
     for row in rows:
         status_emoji = "✅" if row['status'] == "accepted" else "⏳" if row['status'] == "pending" else "❌"
-        reason_text = ""
-        if row['status'] == "rejected" and row['reject_reason']:
-            reason_text = f" ({'блок' if row['reject_reason']=='block' else 'нескан'})"
+        reason = f" ({'блок' if row['reject_reason']=='block' else 'нескан'})" if row['status'] == 'rejected' and row['reject_reason'] else ""
         earned = row['earned_amount'] or 0
-        dt = row['submitted_at'][:16]
-        text += f"{status_emoji} {row['operator']} - {row['price']}$ | {dt} | +{earned}$ {reason_text}\n"
+        dt = row['submitted_at'].strftime("%Y-%m-%d %H:%M")
+        text += f"{status_emoji} {row['operator']} - {row['price']}$ | {dt} | +{earned}$ {reason}\n"
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=back_button())
     await callback.answer()
 
-@router.callback_query(F.data == "back_to_menu")
-async def back_menu_callback(callback: CallbackQuery):
-    await callback.message.delete()
-    await callback.message.answer("Главное меню:", reply_markup=main_menu(callback.from_user.id in ADMIN_IDS))
-
-# ---------- Бронирование (как в предыдущей версии) ----------
+# ---------- Бронирование ----------
 @router.message(F.text == "📅 Бронирование")
 async def cmd_booking(message: Message):
     active = await get_active_booking(message.from_user.id)
@@ -519,7 +438,6 @@ async def book_operator_list(callback: CallbackQuery):
     if not available:
         await callback.answer("Нет свободных слотов для бронирования.", show_alert=True)
         return
-    from keyboards.user_keyboards import operators_for_booking
     await callback.message.edit_text("Выберите оператора для бронирования:", reply_markup=operators_for_booking(available))
     await callback.answer()
 
@@ -533,12 +451,11 @@ async def create_booking_callback(callback: CallbackQuery):
         return
     op_list = await get_operators()
     op_data = next((op for op in op_list if op['name'] == operator), None)
-    if op_data:
-        if op_data['slot_limit'] != -1:
-            used = await count_active_bookings_for_operator(operator)
-            if used >= op_data['slot_limit']:
-                await callback.answer("Все слоты заняты.", show_alert=True)
-                return
+    if op_data and op_data['slot_limit'] != -1:
+        used = await count_active_bookings_for_operator(operator)
+        if used >= op_data['slot_limit']:
+            await callback.answer("Все слоты заняты.", show_alert=True)
+            return
     await create_booking(user_id, operator)
     await callback.message.edit_text(f"✅ Вы забронировали {operator}. Бронь сгорит после сдачи eSIM.", reply_markup=booking_menu(True))
     await callback.answer()
@@ -569,12 +486,12 @@ async def cmd_bonuses(message: Message):
     qr_count_30d, unique_dates = await get_user_qr_last_30_days(user_id)
     rank_name, bonus = calculate_rank(qr_count_30d)
 
-    async with aiosqlite.connect(DATABASE) as conn:
-        cur = await conn.execute(
-            "SELECT COUNT(*) FROM qr_submissions WHERE user_id = ? AND status='accepted' AND date(submitted_at) = date('now')",
-            (user_id,)
-        )
-        qr_today = (await cur.fetchone())[0] or 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        qr_today = await conn.fetchval("""
+            SELECT COUNT(*) FROM qr_submissions
+            WHERE user_id = $1 AND status='accepted' AND DATE(submitted_at) = CURRENT_DATE
+        """, user_id) or 0
 
     volume_points = calculate_volume_points(qr_today)
     regularity_points = calculate_regularity_points(len(unique_dates))
@@ -596,7 +513,7 @@ async def cmd_bonuses(message: Message):
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=back_button())
 
-# ---------- Рефералы из главного меню ----------
+# ---------- Рефералы (кнопка в главном меню) ----------
 @router.message(F.text == "👥 Рефералы")
 async def referral_button(message: Message):
     user = await get_user(message.from_user.id)
@@ -617,9 +534,9 @@ async def referral_button(message: Message):
         f"0–20 QR → 0%\n21–40 → 1%\n41–60 → 2%\n61–100 → 3%\n101–199 → 3.5%\n200+ → 4%\n\n"
         f"Запрос на вывод от $10."
     )
-    await message.answer(text, reply_markup=back_button())   # убрали parse_mode
+    await message.answer(text, reply_markup=back_button())
 
-# ---------- Мой бот из главного меню ----------
+# ---------- Мой бот ----------
 @router.message(F.text == "🤖 Мой бот")
 async def my_bot_button(message: Message):
     text = (
@@ -661,80 +578,10 @@ async def pay_earnings(message: Message):
         return
     amount = user['earned_today']
     await add_crypto_balance(user_id, amount)
-    async with aiosqlite.connect(DATABASE) as conn:
-        await conn.execute("UPDATE users SET earned_today = 0 WHERE user_id = ?", (user_id,))
-        await conn.commit()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET earned_today = 0 WHERE user_id = $1", user_id)
     await message.answer(f"✅ {amount:.2f}$ переведены в крипто-баланс. Для вывода используйте /withdraw")
-
-@router.message(F.text == "📋 Мои заявки")
-async def my_tasks(message: Message):
-    user_id = message.from_user.id
-    role = await get_user_role(user_id)
-    if role != 'worker' and user_id not in ADMIN_IDS:
-        await message.answer("Эта функция только для работников.")
-        return
-    # Получаем заявки, которые взял этот работник и которые ещё не завершены (status 'taken')
-    async with aiosqlite.connect(DATABASE) as conn:
-        conn.row_factory = aiosqlite.Row
-        cur = await conn.execute("""
-            SELECT id, operator, phone, submitted_at, taken_at
-            FROM qr_submissions
-            WHERE taken_by = ? AND status = 'taken'
-            ORDER BY taken_at DESC
-        """, (user_id,))
-        rows = await cur.fetchall()
-    if not rows:
-        await message.answer("У вас нет активных заявок в работе.")
-        return
-    text = "📋 Ваши активные заявки:\n\n"
-    for row in rows:
-        text += f"ID {row['id']} | {row['operator']} | +{row['phone']} | взято: {row['taken_at']}\n"
-    await message.answer(text, reply_markup=back_button())
-
-@router.message(F.text == "❌ Стоп")
-async def stop_action(message: Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state:
-        await state.clear()
-        await message.answer("✅ Действие отменено. Возврат в главное меню.",
-                             reply_markup=main_menu(message.from_user.id in ADMIN_IDS,
-                                                    await get_user_role(message.from_user.id) == 'worker'))
-    else:
-        await message.answer("🤷‍♂️ Нет активного действия для отмены.",
-                             reply_markup=main_menu(message.from_user.id in ADMIN_IDS,
-                                                    await get_user_role(message.from_user.id) == 'worker'))
-
-@router.message(F.text == "📋 Мои заявки")
-async def my_tasks(message: Message):
-    user_id = message.from_user.id
-    role = await get_user_role(user_id)
-    if role not in ('admin', 'worker'):
-        await message.answer("Эта функция только для работников и администраторов.")
-        return
-    async with aiosqlite.connect(DATABASE) as conn:
-        conn.row_factory = aiosqlite.Row
-        cur = await conn.execute("""
-            SELECT id, operator, phone, submitted_at, taken_at
-            FROM qr_submissions
-            WHERE taken_by = ? AND status = 'taken'
-            ORDER BY taken_at DESC
-        """, (user_id,))
-        rows = await cur.fetchall()
-    if not rows:
-        await message.answer("У вас нет активных заявок в работе.", reply_markup=back_button())
-        return
-    text = "📋 Ваши активные заявки:\n\n"
-    for row in rows:
-        text += (f"ID {row['id']} | {row['operator']} | +{row['phone']}\n"
-                 f"   взято: {row['taken_at']}\n")
-    await message.answer(text, reply_markup=back_button())
-
-@router.message(F.text == "❌ Стоп")
-async def stop_action(message: Message, state: FSMContext):
-    print("Обработчик ❌ Стоп вызван")  # для отладки
-    current_state = await state.get_state()
-    if current_state:
-        await state.clear()
 
 @router.message(Command("withdraw"))
 async def withdraw_cmd(message: Message):
@@ -755,9 +602,21 @@ async def withdraw_cmd(message: Message):
     if user['crypto_balance'] < amount:
         await message.answer("❌ Недостаточно средств на крипто-балансе.")
         return
-    async with aiosqlite.connect(DATABASE) as conn:
-        await conn.execute("UPDATE users SET crypto_balance = crypto_balance - ? WHERE user_id = ?", (amount, user_id))
-        await conn.commit()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET crypto_balance = crypto_balance - $1 WHERE user_id = $2", amount, user_id)
     for admin in ADMIN_IDS:
         await message.bot.send_message(admin, f"💰 Запрос вывода: @{message.from_user.username} (ID {user_id}) на сумму {amount}$")
     await message.answer(f"✅ Запрос на вывод {amount}$ отправлен администратору.")
+
+@router.callback_query(F.data == "ref_system")
+async def ref_system_callback(callback: CallbackQuery):
+    # Дублируем referral_button для удобства (можно удалить, если не нужно)
+    await referral_button(callback.message)
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_menu")
+async def back_menu_callback(callback: CallbackQuery):
+    await callback.message.delete()
+    role = await get_user_role(callback.from_user.id)
+    await callback.message.answer("Главное меню:", reply_markup=main_menu(callback.from_user.id in ADMIN_IDS, role == 'worker'))
