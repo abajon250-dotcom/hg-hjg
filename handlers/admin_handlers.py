@@ -5,25 +5,25 @@ from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
-import aiosqlite
 
 from config import ADMIN_IDS
 from db import (
-    get_pending_submissions, get_operators, update_operator_prices,
+    get_pool, get_pending_submissions, get_operators, update_operator_prices,
     update_operator_slot_limit, get_setting, set_setting, get_today_stats,
     get_top_users, get_user, add_crypto_balance, reject_submission,
     get_submission, accept_submission_now, get_user_qr_last_30_days,
     accept_submission_from_hold, hold_submission, take_submission,
-    get_user_role, set_user_role, DATABASE
+    get_user_role, remove_worker, add_worker, get_workers, mark_submission_failed,
+    mark_submission_blocked
 )
-from states import AdminSetPrice, AdminSetSlot, BroadcastState
+from states import AdminSetPrice, AdminSetSlot, BroadcastState, AdminAddWorker, AdminDelWorker
 from utils import calculate_rank
-from keyboards.admin_keyboards import (
+from user_keyboards import main_menu
+from admin_keyboards import (
     admin_main_menu, pending_actions, operators_price_edit,
     operators_slot_edit, mode_buttons, confirm_clear, payout_list,
-    work_actions
+    workers_menu, work_actions
 )
-from keyboards.user_keyboards import main_menu
 
 router = Router()
 hold_tasks = {}
@@ -31,9 +31,6 @@ hold_tasks = {}
 async def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-# ------------------------------------------------------------
-# Главное меню админа
-# ------------------------------------------------------------
 @router.message(F.text == "👑 Админ панель")
 async def admin_panel_button(message: Message):
     if not await is_admin(message.from_user.id):
@@ -49,9 +46,6 @@ async def admin_back(callback: CallbackQuery):
     await callback.message.edit_text("👑 Панель администратора", reply_markup=admin_main_menu())
     await callback.answer()
 
-# ------------------------------------------------------------
-# Непроверенные заявки
-# ------------------------------------------------------------
 @router.callback_query(F.data == "admin_pending")
 async def list_pending(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
@@ -68,9 +62,6 @@ async def list_pending(callback: CallbackQuery):
     await callback.message.delete()
     await callback.answer()
 
-# ------------------------------------------------------------
-# Изменение цен
-# ------------------------------------------------------------
 @router.callback_query(F.data == "admin_prices")
 async def edit_prices_menu(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
@@ -106,9 +97,6 @@ async def set_new_prices(message: Message, state: FSMContext):
     await message.answer(f"✅ Цены для {operator} обновлены:\nХОЛД: {price_hold}$, БХ: {price_bh}$")
     await state.clear()
 
-# ------------------------------------------------------------
-# Переключение режима
-# ------------------------------------------------------------
 @router.callback_query(F.data == "admin_toggle_mode")
 async def toggle_mode_menu(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
@@ -127,9 +115,6 @@ async def toggle_mode(callback: CallbackQuery):
     await callback.message.edit_text(f"Режим изменён на: {'БХ' if new_mode == 'bh' else 'ХОЛД'}", reply_markup=admin_main_menu())
     await callback.answer()
 
-# ------------------------------------------------------------
-# Управление слотами брони
-# ------------------------------------------------------------
 @router.callback_query(F.data == "admin_slots")
 async def slots_menu(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
@@ -161,9 +146,6 @@ async def set_slot_limit(message: Message, state: FSMContext):
     await message.answer(f"Лимит слотов для {operator} установлен: {limit if limit != -1 else 'безлимит'}")
     await state.clear()
 
-# ------------------------------------------------------------
-# Статистика
-# ------------------------------------------------------------
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
@@ -178,18 +160,14 @@ async def admin_stats(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=admin_main_menu())
     await callback.answer()
 
-# ------------------------------------------------------------
-# Выплаты
-# ------------------------------------------------------------
 @router.callback_query(F.data == "admin_payouts")
 async def payouts_list(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
         return
-    async with aiosqlite.connect(DATABASE) as conn:
-        conn.row_factory = aiosqlite.Row
-        async with conn.execute("SELECT user_id, username, earned_today FROM users WHERE earned_today > 0") as cur:
-            rows = await cur.fetchall()
-            users = [{"user_id": row['user_id'], "username": row['username'], "earned_today": row['earned_today']} for row in rows]
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, username, earned_today FROM users WHERE earned_today > 0")
+        users = [dict(row) for row in rows]
     if not users:
         await callback.message.edit_text("Нет пользователей для выплаты сегодня.", reply_markup=admin_main_menu())
         return
@@ -199,16 +177,13 @@ async def payouts_list(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("mark_paid:"))
 async def mark_paid(callback: CallbackQuery):
     uid = int(callback.data.split(":")[1])
-    async with aiosqlite.connect(DATABASE) as conn:
-        await conn.execute("UPDATE users SET earned_today = 0 WHERE user_id = ?", (uid,))
-        await conn.commit()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET earned_today = 0 WHERE user_id = $1", uid)
     await callback.answer("Пользователь отмечен как выплаченный")
     await callback.message.delete()
     await callback.message.answer("Главное меню админа", reply_markup=admin_main_menu())
 
-# ------------------------------------------------------------
-# Очистка непроверенных
-# ------------------------------------------------------------
 @router.callback_query(F.data == "admin_clear_pending")
 async def confirm_clear(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
@@ -220,15 +195,12 @@ async def confirm_clear(callback: CallbackQuery):
 async def clear_pending(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
         return
-    async with aiosqlite.connect(DATABASE) as conn:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         await conn.execute("DELETE FROM qr_submissions WHERE status = 'pending'")
-        await conn.commit()
     await callback.message.edit_text("Все непроверенные заявки удалены.", reply_markup=admin_main_menu())
     await callback.answer()
 
-# ------------------------------------------------------------
-# Крипто-баланс (пополнение админом)
-# ------------------------------------------------------------
 @router.message(Command("add_crypto"))
 async def add_crypto(message: Message):
     if not await is_admin(message.from_user.id):
@@ -246,9 +218,6 @@ async def add_crypto(message: Message):
     await add_crypto_balance(uid, amount)
     await message.answer(f"Крипто-баланс пользователя {uid} пополнен на {amount}$")
 
-# ------------------------------------------------------------
-# Рассылка
-# ------------------------------------------------------------
 @router.callback_query(F.data == "admin_broadcast")
 async def broadcast_start(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
@@ -261,15 +230,14 @@ async def broadcast_start(callback: CallbackQuery, state: FSMContext):
 async def broadcast_send(message: Message, state: FSMContext, bot: Bot):
     if not await is_admin(message.from_user.id):
         return
-    async with aiosqlite.connect(DATABASE) as conn:
-        async with conn.execute("SELECT user_id FROM users") as cur:
-            rows = await cur.fetchall()
-            user_ids = [row[0] for row in rows]
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id FROM users")
+        user_ids = [row['user_id'] for row in rows]
     if not user_ids:
         await message.answer("Нет пользователей.")
         await state.clear()
         return
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Да, отправить", callback_data="confirm_broadcast")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back")]
@@ -286,10 +254,10 @@ async def broadcast_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot
     if not orig:
         await callback.answer("Сообщение не найдено")
         return
-    async with aiosqlite.connect(DATABASE) as conn:
-        async with conn.execute("SELECT user_id FROM users") as cur:
-            rows = await cur.fetchall()
-            user_ids = [row[0] for row in rows]
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id FROM users")
+        user_ids = [row['user_id'] for row in rows]
     success = 0
     fail = 0
     for uid in user_ids:
@@ -311,9 +279,44 @@ async def broadcast_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot
     await state.clear()
     await callback.answer()
 
-# ------------------------------------------------------------
-# Взятие заявки в работу (для админов и работников)
-# ------------------------------------------------------------
+# ---------- Управление работниками (команды) ----------
+@router.message(Command("add_worker"))
+async def cmd_add_worker(message: Message):
+    if not await is_admin(message.from_user.id):
+        return
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer("Использование: /add_worker <user_id>")
+        return
+    try:
+        user_id = int(args[1])
+    except:
+        await message.answer("Неверный ID")
+        return
+    user = await get_user(user_id)
+    if not user:
+        await message.answer("Пользователь не найден")
+        return
+    await add_worker(user_id)
+    await message.answer(f"✅ Пользователь {user_id} назначен работником.")
+
+@router.message(Command("remove_worker"))
+async def cmd_remove_worker(message: Message):
+    if not await is_admin(message.from_user.id):
+        return
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer("Использование: /remove_worker <user_id>")
+        return
+    try:
+        user_id = int(args[1])
+    except:
+        await message.answer("Неверный ID")
+        return
+    await remove_worker(user_id)
+    await message.answer(f"✅ Пользователь {user_id} больше не работник.")
+
+# ---------- Обработка заявок (взятие, засчитать, слетел, блок) ----------
 @router.callback_query(F.data.startswith("take_sub:"))
 async def take_submission_callback(callback: CallbackQuery, bot: Bot):
     worker_id = callback.from_user.id
@@ -337,9 +340,6 @@ async def take_submission_callback(callback: CallbackQuery, bot: Bot):
     )
     await callback.answer()
 
-# ------------------------------------------------------------
-# Обработчики действий над заявкой
-# ------------------------------------------------------------
 @router.callback_query(F.data.startswith("pay_sub:"))
 async def pay_submission_callback(callback: CallbackQuery, bot: Bot):
     admin_id = callback.from_user.id
@@ -359,9 +359,8 @@ async def pay_submission_callback(callback: CallbackQuery, bot: Bot):
     else:
         hold_until = datetime.now() + timedelta(minutes=30)
         await hold_submission(submission_id, admin_id, hold_until)
-        # Запускаем таймер
-        from handlers.callback_handlers import start_hold_timer
         delay = 30 * 60
+        from callback_handlers import start_hold_timer
         task = asyncio.create_task(start_hold_timer(bot, submission_id, sub['price'], sub['user_id'], delay))
         hold_tasks[submission_id] = task
         await bot.send_message(sub['user_id'], f"✅ Номер принят и переведён в холд на 30 минут. Начисление будет автоматически.")
@@ -376,8 +375,6 @@ async def fail_submission_callback(callback: CallbackQuery, bot: Bot):
     if not sub or sub['status'] != 'taken':
         await callback.answer("Заявка не в работе", show_alert=True)
         return
-    # Функция mark_submission_failed должна быть в db.py
-    from db import mark_submission_failed
     await mark_submission_failed(submission_id, admin_id)
     await bot.send_message(sub['user_id'], "🔄 Ваш номер слетел (не засчитан).")
     await callback.message.edit_caption(caption=f"❌ Заявка #{submission_id} помечена как слетевшая (админ @{callback.from_user.username})", reply_markup=None)
@@ -391,47 +388,7 @@ async def block_submission_callback(callback: CallbackQuery, bot: Bot):
     if not sub or sub['status'] != 'taken':
         await callback.answer("Заявка не в работе", show_alert=True)
         return
-    from db import mark_submission_blocked
     await mark_submission_blocked(submission_id, admin_id)
     await bot.send_message(sub['user_id'], "🚫 Ваш номер заблокирован (не засчитан).")
     await callback.message.edit_caption(caption=f"🚫 Заявка #{submission_id} заблокирована (админ @{callback.from_user.username})", reply_markup=None)
     await callback.answer()
-
-# ------------------------------------------------------------
-# Команды для управления работниками (простые, без меню)
-# ------------------------------------------------------------
-@router.message(Command("add_worker"))
-async def cmd_add_worker(message: Message):
-    if not await is_admin(message.from_user.id):
-        return
-    args = message.text.split()
-    if len(args) != 2:
-        await message.answer("Использование: /add_worker <user_id>")
-        return
-    try:
-        user_id = int(args[1])
-    except:
-        await message.answer("Неверный ID")
-        return
-    user = await get_user(user_id)
-    if not user:
-        await message.answer("Пользователь не найден")
-        return
-    await set_user_role(user_id, "worker")
-    await message.answer(f"✅ Пользователь {user_id} назначен работником.")
-
-@router.message(Command("remove_worker"))
-async def cmd_remove_worker(message: Message):
-    if not await is_admin(message.from_user.id):
-        return
-    args = message.text.split()
-    if len(args) != 2:
-        await message.answer("Использование: /remove_worker <user_id>")
-        return
-    try:
-        user_id = int(args[1])
-    except:
-        await message.answer("Неверный ID")
-        return
-    await set_user_role(user_id, "user")
-    await message.answer(f"✅ Пользователь {user_id} больше не работник.")
