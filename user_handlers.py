@@ -29,9 +29,19 @@ from admin_keyboards import pending_actions
 
 router = Router()
 
-TERMS_TEXT = """📄 **Условия работы:** ..."""  # опущено для краткости, но можно вставить полный текст
+TERMS_TEXT = """📄 **Условия работы:**
 
-# ---------- Старт ----------
+• Формат сдачи: одним сообщением — QR‑код + номер телефона в формате "79999999999" для каждой eSIM.
+
+• Критерии: оплаченный тариф (минимум 100 минут) и рабочий QR‑код, залитые QR в несколько приёмок не оплачиваем.
+
+• Выплаты: ежедневно, день в день, после 17:00-19:00 (МСК).
+
+• Wi‑Fi‑звонки не требуются! Не сканируйте QR‑код своим устройством - часто он одноразовый, ничего включать не нужно.
+
+⚠ Условия могут меняться без уведомления.
+Без принятия условий доступ к функционалу закрыт."""
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     args = message.text.split()
@@ -143,17 +153,78 @@ async def select_operator(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# ---------- Приём фото ----------
+# ---------- Приём фото (основной обработчик) ----------
 @router.message(SubmitEsim.waiting_for_photo_and_phone, F.photo)
 async def receive_photo(message: Message, state: FSMContext):
-    # ... (код без изменений, использует get_pool для проверки дубля)
-    # см. предыдущий ответ
-    pass
+    if not message.caption:
+        await message.answer("❌ Добавьте номер телефона в подпись к фото.")
+        return
+    phone = message.caption.strip()
+    if not validate_phone(phone):
+        await message.answer("❌ Неверный номер. Нужно 11 цифр, начинается с 7. Пример: +79001234567")
+        return
+    phone = normalize_phone(phone)
+    region = phone[:3] if len(phone) >= 3 else ""
+    data = await state.get_data()
+    operator = data.get('operator')
+    price = data.get('price')
+    if not operator or not price:
+        await message.answer("❌ Ошибка: выберите оператора заново.")
+        await state.clear()
+        return
 
+    user_id = message.from_user.id
+    photo_file_id = message.photo[-1].file_id
+
+    mode = await get_setting("sale_mode", "hold")
+    if mode == "hold":
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            existing = await conn.fetchval("""
+                SELECT id FROM qr_submissions
+                WHERE operator = $1 AND phone = $2 AND submitted_at >= NOW() - INTERVAL '30 minutes'
+            """, operator, phone)
+            if existing:
+                await message.answer("❌ Этот QR уже сдан недавно (режим ХОЛД). Подождите 30 минут.")
+                await state.clear()
+                return
+
+    submission_id = await create_submission(user_id, operator, price, phone, photo_file_id, region)
+    role = await get_user_role(user_id)
+    await message.answer("✅ QR принят на проверку. Ожидайте решения админа.", reply_markup=main_menu(user_id in ADMIN_IDS, role == 'worker'))
+    await state.clear()
+
+    user = await get_user(user_id)
+    username = user['username'] or str(user_id)
+    qr_count_30d, _ = await get_user_qr_last_30_days(user_id)
+    _, bonus = calculate_rank(qr_count_30d)
+    text = (
+        f"🆕 Новая сдача eSIM\n"
+        f"👤 Пользователь: @{username} (ID {user_id})\n"
+        f"📱 Оператор: {operator}\n"
+        f"💰 Стоимость: {price}$ + бонус {bonus}$\n"
+        f"📞 Номер: {phone}\n"
+        f"🕒 Время: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        f"ID заявки: {submission_id}"
+    )
+    for admin in ADMIN_IDS:
+        try:
+            await message.bot.send_photo(admin, photo_file_id, caption=text, reply_markup=pending_actions(submission_id))
+        except Exception as e:
+            logging.error(f"Не удалось отправить уведомление админу {admin}: {e}")
+
+# ---------- Обработчик неправильного ввода в состоянии ожидания фото ----------
 @router.message(SubmitEsim.waiting_for_photo_and_phone)
-async def incorrect_input(message: Message):
+async def incorrect_input(message: Message, state: FSMContext):
+    # Если нажата кнопка "❌ Стоп" – сбрасываем состояние
+    if message.text == "❌ Стоп":
+        await state.clear()
+        role = await get_user_role(message.from_user.id)
+        await message.answer("✅ Действие отменено.", reply_markup=main_menu(message.from_user.id in ADMIN_IDS, role == 'worker'))
+        return
     await message.answer("❌ Пожалуйста, отправьте **фото** с подписью-номером. Для отмены нажмите ❌ Стоп")
 
+# ---------- Глобальная кнопка "❌ Стоп" (вне состояния) ----------
 @router.message(F.text == "❌ Стоп")
 async def stop_action(message: Message, state: FSMContext):
     current_state = await state.get_state()
@@ -162,7 +233,7 @@ async def stop_action(message: Message, state: FSMContext):
         await state.clear()
         await message.answer("✅ Действие отменено.", reply_markup=main_menu(message.from_user.id in ADMIN_IDS, role == 'worker'))
     else:
-        await message.answer("🤷‍♂️ Нет активного действия.", reply_markup=main_menu(message.from_user.id in ADMIN_IDS, role == 'worker'))
+        await message.answer("🤷‍♂️ Нет активного действия для отмены.", reply_markup=main_menu(message.from_user.id in ADMIN_IDS, role == 'worker'))
 
 # ---------- Профиль ----------
 @router.message(F.text == "👤 Профиль")
@@ -220,6 +291,7 @@ async def cmd_profile(message: Message):
     )
     await message.answer(text, reply_markup=profile_keyboard())
 
+# ---------- Кнопка "Полезное" и подменю ----------
 @router.callback_query(F.data == "useful")
 async def useful_menu(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -235,13 +307,13 @@ async def useful_menu(callback: CallbackQuery):
 async def faq_section(callback: CallbackQuery):
     text = (
         "**FAQ – Часто задаваемые вопросы**\n\n"
-        "• **Актуальный прайс (за каждую отдельную eSIM с холодом 30м)**\n"
-        "  - МТС (включая салон) — 14$ (бх - 8$ за eSIM)\n"
-        "  - Сбер — 10$ (бх - 7$ за eSIM)\n"
-        "  - Билайн — 13$ (бх - 9$ за eSIM)\n"
-        "  - Т2 — 12$ (бх - 8$ за eSIM)\n"
-        "  - ВТБ — 25$ (бх 18$)\n"
-        "  - Газпром — 28$ (бх 21$)\n"
+        "• **Актуальный прайс (за каждую отдельную eSIM с холодом 30м / БХ)**\n"
+        "  - МТС (включая салон) — 14$ (БХ - 8$ за eSIM)\n"
+        "  - Сбер — 10$ (БХ - 7$ за eSIM)\n"
+        "  - Билайн — 13$ (БХ - 9$ за eSIM)\n"
+        "  - Т2 — 12$ (БХ - 8$ за eSIM)\n"
+        "  - ВТБ — 25$ (БХ 18$)\n"
+        "  - Газпром — 28$ (БХ 21$)\n"
         "  - Тинькофф — 12$\n"
         "  - Мегафон — 11$\n"
         "  - Миранда — 12$\n"
@@ -267,7 +339,7 @@ async def detailed_stats(callback: CallbackQuery):
         total = stats['total'] if stats['total'] else "пусто"
         blocked = stats['blocked'] if stats['blocked'] else "пусто"
         noscan = stats['noscan'] if stats['noscan'] else "пусто"
-        sum_earned = stats['sum_earned'] if stats['sum_earned'] else 0
+        sum_earned = stats['sum_earned'] or 0
         sum_str = f"{sum_earned:.2f}$" if sum_earned else "пусто"
         text += f"• **{label}**\n"
         text += f"  ✅ Сдано: {total}\n"
@@ -307,6 +379,7 @@ async def operator_stats(callback: CallbackQuery):
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     await callback.answer()
 
+# ---------- Мои номера ----------
 @router.callback_query(F.data == "my_numbers")
 async def show_my_numbers(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -321,6 +394,7 @@ async def show_my_numbers(callback: CallbackQuery):
     await callback.message.answer(text, reply_markup=back_button())
     await callback.answer()
 
+# ---------- История сдач ----------
 @router.callback_query(F.data == "history")
 async def show_history(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -346,6 +420,7 @@ async def show_history(callback: CallbackQuery):
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=back_button())
     await callback.answer()
 
+# ---------- Бронирование ----------
 @router.message(F.text == "📅 Бронирование")
 async def cmd_booking(message: Message):
     active = await get_active_booking(message.from_user.id)
@@ -413,6 +488,7 @@ async def edit_booking_callback(callback: CallbackQuery):
         await cancel_booking(booking['id'])
     await book_operator_list(callback)
 
+# ---------- Бонусы ----------
 @router.message(F.text == "🎁 Бонусы")
 async def cmd_bonuses(message: Message):
     user_id = message.from_user.id
@@ -446,6 +522,7 @@ async def cmd_bonuses(message: Message):
     )
     await message.answer(text, parse_mode="Markdown", reply_markup=back_button())
 
+# ---------- Рефералы ----------
 @router.message(F.text == "👥 Рефералы")
 async def referral_button(message: Message):
     user = await get_user(message.from_user.id)
@@ -468,6 +545,7 @@ async def referral_button(message: Message):
     )
     await message.answer(text, reply_markup=back_button())
 
+# ---------- Мой бот ----------
 @router.message(F.text == "🤖 Мой бот")
 async def my_bot_button(message: Message):
     text = (
@@ -496,6 +574,7 @@ async def deploy_command(message: Message):
         await message.bot.send_message(admin, f"🚀 Запрос на развёртывание бота от @{message.from_user.username} (ID {message.from_user.id})\nТокен: {token}")
     await message.answer("✅ Запрос отправлен администратору. Ожидайте.")
 
+# ---------- Крипто-выплаты ----------
 @router.message(Command("pay"))
 async def pay_earnings(message: Message):
     user_id = message.from_user.id
