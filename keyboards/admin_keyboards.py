@@ -8,19 +8,16 @@ def admin_main_menu():
         [InlineKeyboardButton(text="🎫 Управление слотами брони", callback_data="admin_slots")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="💸 Выплаты", callback_data="admin_payouts")],
-        [InlineKeyboardButton(text="👥 Работники", callback_data="admin_workers")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="🧹 Очистить все непроверенные", callback_data="admin_clear_pending")]
     ])
 
 def pending_actions(submission_id: int):
-    """Кнопка 'Взять в работу' для новой заявки"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👨‍💻 Взять в работу", callback_data=f"take_sub:{submission_id}")]
+            [InlineKeyboardButton(text="👨‍💻 Взять в работу", callback_data=f"take_sub:{submission_id}")]
     ])
 
 def work_actions(submission_id: int):
-    """Кнопки для работника после взятия заявки"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Засчитать выплату", callback_data=f"pay_sub:{submission_id}"),
          InlineKeyboardButton(text="🔄 Слетел", callback_data=f"fail_sub:{submission_id}")],
@@ -62,11 +59,3 @@ def payout_list(users):
         kb.append([InlineKeyboardButton(text=f"@{u['username']} - {u['earned_today']:.2f}$", callback_data=f"mark_paid:{u['user_id']}")])
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
-
-def workers_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Список работников", callback_data="workers_list")],
-        [InlineKeyboardButton(text="➕ Добавить работника", callback_data="add_worker_start")],
-        [InlineKeyboardButton(text="🗑 Удалить работника", callback_data="del_worker_start")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
-    ])
