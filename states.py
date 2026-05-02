@@ -11,3 +11,6 @@ class AdminSetSlot(StatesGroup):
 
 class BroadcastState(StatesGroup):
     waiting_for_message = State()
+
+class WithdrawState(StatesGroup):
+    waiting_for_amount = State()
