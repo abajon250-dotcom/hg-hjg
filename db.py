@@ -59,12 +59,13 @@ async def init_db():
                 taken_at TIMESTAMP
             )
         """)
-        # Добавление колонки mode (если её нет)
-        try:
+        # Добавление колонки mode, если её нет (безопасно)
+        exists = await conn.fetchval("""
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'qr_submissions' AND column_name = 'mode'
+        """)
+        if not exists:
             await conn.execute("ALTER TABLE qr_submissions ADD COLUMN mode TEXT DEFAULT 'hold'")
-        except Exception as e:
-            if 'duplicate column' not in str(e).lower():
-                raise e
 
         # Операторы
         await conn.execute("""
@@ -191,7 +192,6 @@ async def init_db():
             ]
             for code, name in regions:
                 await conn.execute("INSERT INTO regions (code, name) VALUES ($1, $2) ON CONFLICT (code) DO NOTHING", code, name)
-
 # ------------------------------------------------------------
 # Пользователи и роли
 # ------------------------------------------------------------
