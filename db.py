@@ -1,4 +1,3 @@
-# db.py – финальная версия для PostgreSQL
 import asyncpg
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
@@ -20,6 +19,7 @@ async def get_pool() -> asyncpg.Pool:
 async def init_db():
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # Таблицы
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -473,6 +473,9 @@ async def get_referral_stats(user_id: int) -> Dict:
         earnings = user['referral_earnings'] if user else 0
         return {"count": count, "earnings": earnings}
 
+# ------------------------------------------------------------
+# Общая статистика пользователей
+# ------------------------------------------------------------
 async def get_total_users_count() -> int:
     pool = await get_pool()
     async with pool.acquire() as conn:
