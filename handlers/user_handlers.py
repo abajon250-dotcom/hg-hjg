@@ -14,9 +14,9 @@ from db import (
     create_booking, get_user_stats, get_operator_top_regions,
     get_operator_conditions, get_referral_percent, get_referral_stats,
     get_user_role, get_most_popular_operator, get_low_stock_operators,
-    get_pool
+    get_pool, create_withdraw_request
 )
-from states import SubmitEsim
+from states import SubmitEsim, WithdrawState
 from utils import (
     validate_phone, normalize_phone, calculate_rank,
     calculate_volume_points, calculate_regularity_points, calculate_priority
@@ -42,6 +42,7 @@ TERMS_TEXT = """📄 **Условия работы:**
 ⚠ Условия могут меняться без уведомления.
 Без принятия условий доступ к функционалу закрыт."""
 
+# ---------- Старт, принятие условий, проверка подписки ----------
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     args = message.text.split()
@@ -153,7 +154,6 @@ async def select_operator(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# ---------- Приём фото (основной обработчик) ----------
 @router.message(SubmitEsim.waiting_for_photo_and_phone, F.photo)
 async def receive_photo(message: Message, state: FSMContext):
     if not message.caption:
@@ -189,7 +189,6 @@ async def receive_photo(message: Message, state: FSMContext):
                 await state.clear()
                 return
 
-    mode = await get_setting("sale_mode", "hold")
     submission_id = await create_submission(user_id, operator, price, phone, photo_file_id, region, mode)
     role = await get_user_role(user_id)
     await message.answer("✅ QR принят на проверку. Ожидайте решения админа.", reply_markup=main_menu(user_id in ADMIN_IDS, role == 'worker'))
@@ -198,7 +197,8 @@ async def receive_photo(message: Message, state: FSMContext):
     user = await get_user(user_id)
     username = user['username'] or str(user_id)
     qr_count_30d, _ = await get_user_qr_last_30_days(user_id)
-    _, bonus = calculate_rank(qr_count_30d)   # используем calculate_rank
+    _, bonus = calculate_rank(qr_count_30d)
+    mode_text = "ХОЛД" if mode == "hold" else "БХ"
     text = (
         f"🆕 Новая сдача eSIM\n"
         f"👤 Пользователь: @{username} (ID {user_id})\n"
@@ -215,7 +215,6 @@ async def receive_photo(message: Message, state: FSMContext):
         except Exception as e:
             logging.error(f"Не удалось отправить уведомление админу {admin}: {e}")
 
-# ---------- Обработчик неправильного ввода в состоянии ожидания фото ----------
 @router.message(SubmitEsim.waiting_for_photo_and_phone)
 async def incorrect_input(message: Message, state: FSMContext):
     if message.text == "❌ Стоп":
@@ -225,7 +224,6 @@ async def incorrect_input(message: Message, state: FSMContext):
         return
     await message.answer("❌ Пожалуйста, отправьте **фото** с подписью-номером. Для отмены нажмите ❌ Стоп")
 
-# ---------- Глобальная кнопка "❌ Стоп" (вне состояния) ----------
 @router.message(F.text == "❌ Стоп")
 async def stop_action(message: Message, state: FSMContext):
     current_state = await state.get_state()
@@ -245,7 +243,7 @@ async def cmd_profile(message: Message):
         return
 
     qr_count_30d, unique_dates = await get_user_qr_last_30_days(user['user_id'])
-    rank_name, bonus = calculate_rank(qr_count_30d)   # здесь тоже
+    rank_name, bonus = calculate_rank(qr_count_30d)
 
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -292,8 +290,7 @@ async def cmd_profile(message: Message):
     )
     await message.answer(text, reply_markup=profile_keyboard())
 
-
-# ---------- Кнопка "Полезное" и подменю ----------
+# ---------- Полезное и подменю ----------
 @router.callback_query(F.data == "useful")
 async def useful_menu(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -387,7 +384,6 @@ async def show_my_numbers(callback: CallbackQuery):
     user_id = callback.from_user.id
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # Используем DISTINCT ON, чтобы получить уникальные номера и последнюю дату (для сортировки)
         rows = await conn.fetch("""
             SELECT DISTINCT ON (phone) phone, submitted_at
             FROM qr_submissions
@@ -553,59 +549,73 @@ async def referral_button(message: Message):
     )
     await message.answer(text, reply_markup=back_button())
 
-
-
-# ---------- Крипто-выплаты ----------
-@router.message(Command("pay"))
-async def pay_earnings(message: Message):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
+# ---------- Вывод баланса (через кнопку) – используем earned_today ----------
+@router.callback_query(F.data == "withdraw_balance")
+async def withdraw_balance_start(callback: CallbackQuery, state: FSMContext):
+    user = await get_user(callback.from_user.id)
     if not user:
-        await message.answer("Сначала /start")
+        await callback.answer("Сначала /start", show_alert=True)
         return
     if user['earned_today'] <= 0:
-        await message.answer("Нет средств для перевода.")
+        await callback.answer("❌ У вас нет средств для вывода сегодня.", show_alert=True)
         return
-    amount = user['earned_today']
-    await add_crypto_balance(user_id, amount)
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE users SET earned_today = 0 WHERE user_id = $1", user_id)
-    await message.answer(f"✅ {amount:.2f}$ переведены в крипто-баланс. Для вывода используйте /withdraw")
+    await callback.message.answer(f"💰 Ваш доступный баланс для вывода: {user['earned_today']:.2f}$\n💸 Введите сумму для вывода (число, например 10):")
+    await state.set_state(WithdrawState.waiting_for_amount)
+    await callback.answer()
 
-@router.message(Command("withdraw"))
-async def withdraw_cmd(message: Message):
-    args = message.text.split()
-    if len(args) != 2:
-        await message.answer("Использование: /withdraw <сумма>")
-        return
+@router.message(WithdrawState.waiting_for_amount)
+async def withdraw_balance_amount(message: Message, state: FSMContext):
     try:
-        amount = float(args[1])
+        amount = float(message.text.strip())
+        if amount <= 0:
+            raise ValueError
     except:
-        await message.answer("Неверная сумма")
+        await message.answer("❌ Неверная сумма. Введите положительное число, например 10.")
         return
     user_id = message.from_user.id
     user = await get_user(user_id)
     if not user:
         await message.answer("Сначала /start")
+        await state.clear()
         return
-    if user['crypto_balance'] < amount:
-        await message.answer("❌ Недостаточно средств на крипто-балансе.")
+    if user['earned_today'] < amount:
+        await message.answer(f"❌ Недостаточно средств. Доступно для вывода: {user['earned_today']:.2f}$")
+        await state.clear()
         return
-    # Создаём заявку
+    # Создаём заявку на вывод
     request_id = await create_withdraw_request(user_id, amount)
     await message.answer(f"✅ Заявка на вывод #{request_id} на сумму {amount}$ создана. Ожидайте обработки администратором.")
-    # Уведомляем админов
     for admin in ADMIN_IDS:
         await message.bot.send_message(admin, f"💰 Новая заявка на вывод #{request_id}\n👤 @{message.from_user.username} (ID {user_id})\n💵 Сумма: {amount}$")
+    await state.clear()
 
-@router.callback_query(F.data == "ref_system")
-async def ref_system_callback(callback: CallbackQuery):
-    await referral_button(callback.message)
-    await callback.answer()
-
+# ---------- Назад в меню ----------
 @router.callback_query(F.data == "back_to_menu")
 async def back_menu_callback(callback: CallbackQuery):
     await callback.message.delete()
     role = await get_user_role(callback.from_user.id)
     await callback.message.answer("Главное меню:", reply_markup=main_menu(callback.from_user.id in ADMIN_IDS, role == 'worker'))
+
+# ---------- Мои заявки (для работников) ----------
+@router.message(F.text == "📋 Мои заявки")
+async def my_tasks(message: Message):
+    user_id = message.from_user.id
+    role = await get_user_role(user_id)
+    if role not in ('admin', 'worker'):
+        await message.answer("Эта функция только для работников.")
+        return
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, operator, phone, submitted_at, taken_at
+            FROM qr_submissions
+            WHERE taken_by = $1 AND status = 'taken'
+            ORDER BY taken_at DESC
+        """, user_id)
+    if not rows:
+        await message.answer("У вас нет активных заявок в работе.", reply_markup=back_button())
+        return
+    text = "📋 Ваши активные заявки:\n\n"
+    for row in rows:
+        text += f"ID {row['id']} | {row['operator']} | +{row['phone']}\n   взято: {row['taken_at']}\n"
+    await message.answer(text, reply_markup=back_button())

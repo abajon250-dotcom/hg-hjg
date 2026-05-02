@@ -42,7 +42,7 @@ TERMS_TEXT = """📄 **Условия работы:**
 ⚠ Условия могут меняться без уведомления.
 Без принятия условий доступ к функционалу закрыт."""
 
-# ---------- Старт ----------
+# ---------- Старт, принятие условий, проверка подписки ----------
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     args = message.text.split()
@@ -154,7 +154,6 @@ async def select_operator(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# ---------- Приём фото ----------
 @router.message(SubmitEsim.waiting_for_photo_and_phone, F.photo)
 async def receive_photo(message: Message, state: FSMContext):
     if not message.caption:
@@ -216,7 +215,6 @@ async def receive_photo(message: Message, state: FSMContext):
         except Exception as e:
             logging.error(f"Не удалось отправить уведомление админу {admin}: {e}")
 
-# ---------- Обработчик неправильного ввода в состоянии фото ----------
 @router.message(SubmitEsim.waiting_for_photo_and_phone)
 async def incorrect_input(message: Message, state: FSMContext):
     if message.text == "❌ Стоп":
@@ -226,7 +224,6 @@ async def incorrect_input(message: Message, state: FSMContext):
         return
     await message.answer("❌ Пожалуйста, отправьте **фото** с подписью-номером. Для отмены нажмите ❌ Стоп")
 
-# ---------- Глобальная кнопка Стоп ----------
 @router.message(F.text == "❌ Стоп")
 async def stop_action(message: Message, state: FSMContext):
     current_state = await state.get_state()
@@ -293,7 +290,7 @@ async def cmd_profile(message: Message):
     )
     await message.answer(text, reply_markup=profile_keyboard())
 
-# ---------- Кнопка "Полезное" и подменю ----------
+# ---------- Полезное и подменю ----------
 @router.callback_query(F.data == "useful")
 async def useful_menu(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -552,10 +549,17 @@ async def referral_button(message: Message):
     )
     await message.answer(text, reply_markup=back_button())
 
-# ---------- Крипто-выплаты (кнопка вывода баланса через диалог) ----------
+# ---------- Вывод баланса (через кнопку) – используем earned_today ----------
 @router.callback_query(F.data == "withdraw_balance")
 async def withdraw_balance_start(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("💸 Введите сумму для вывода (число, например 10):")
+    user = await get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Сначала /start", show_alert=True)
+        return
+    if user['earned_today'] <= 0:
+        await callback.answer("❌ У вас нет средств для вывода сегодня.", show_alert=True)
+        return
+    await callback.message.answer(f"💰 Ваш доступный баланс для вывода: {user['earned_today']:.2f}$\n💸 Введите сумму для вывода (число, например 10):")
     await state.set_state(WithdrawState.waiting_for_amount)
     await callback.answer()
 
@@ -574,10 +578,11 @@ async def withdraw_balance_amount(message: Message, state: FSMContext):
         await message.answer("Сначала /start")
         await state.clear()
         return
-    if user['crypto_balance'] < amount:
-        await message.answer(f"❌ Недостаточно средств. Ваш баланс: {user['crypto_balance']:.2f}$")
+    if user['earned_today'] < amount:
+        await message.answer(f"❌ Недостаточно средств. Доступно для вывода: {user['earned_today']:.2f}$")
         await state.clear()
         return
+    # Создаём заявку на вывод
     request_id = await create_withdraw_request(user_id, amount)
     await message.answer(f"✅ Заявка на вывод #{request_id} на сумму {amount}$ создана. Ожидайте обработки администратором.")
     for admin in ADMIN_IDS:
@@ -591,7 +596,7 @@ async def back_menu_callback(callback: CallbackQuery):
     role = await get_user_role(callback.from_user.id)
     await callback.message.answer("Главное меню:", reply_markup=main_menu(callback.from_user.id in ADMIN_IDS, role == 'worker'))
 
-# ---------- Мои заявки для работников ----------
+# ---------- Мои заявки (для работников) ----------
 @router.message(F.text == "📋 Мои заявки")
 async def my_tasks(message: Message):
     user_id = message.from_user.id
