@@ -20,7 +20,7 @@ async def init_db():
     """Создаёт таблицы, индексы и добавляет недостающие колонки (например, mode)"""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # Пользователи
+        # Таблица пользователей
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -38,7 +38,7 @@ async def init_db():
                 permissions TEXT DEFAULT ''
             )
         """)
-        # Заявки с колонкой mode (добавим, если нет)
+        # Заявки
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS qr_submissions (
                 id SERIAL PRIMARY KEY,
@@ -59,11 +59,11 @@ async def init_db():
                 taken_at TIMESTAMP
             )
         """)
-        # Добавление колонки mode, если её нет
+        # Добавление колонки mode (если её нет)
         try:
             await conn.execute("ALTER TABLE qr_submissions ADD COLUMN mode TEXT DEFAULT 'hold'")
         except Exception as e:
-            if 'duplicate column' not in str(e):
+            if 'duplicate column' not in str(e).lower():
                 raise e
 
         # Операторы
@@ -77,7 +77,7 @@ async def init_db():
                 conditions TEXT DEFAULT ''
             )
         """)
-        # Брони
+        # Бронирования
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS bookings (
                 id SERIAL PRIMARY KEY,
@@ -94,7 +94,7 @@ async def init_db():
                 value TEXT
             )
         """)
-        # Статистика
+        # Ежедневная статистика
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_stats (
                 date DATE PRIMARY KEY,
