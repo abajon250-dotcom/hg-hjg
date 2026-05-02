@@ -54,12 +54,11 @@ async def admin_back(callback: CallbackQuery):
 @router.callback_query(F.data == "admin_pending")
 async def list_pending(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
-        await callback.answer("Нет прав", show_alert=True)
         return
-    pending = await get_pending_submissions(20)
+    current_mode = await get_setting("sale_mode", "hold")
+    pending = await get_pending_submissions_by_mode(current_mode, 20)
     if not pending:
-        await callback.message.edit_text("Нет непроверенных заявок.", reply_markup=admin_main_menu())
-        await callback.answer()
+        await callback.message.edit_text(f"Нет непроверенных заявок в режиме {current_mode.upper()}.", reply_markup=admin_main_menu())
         return
     for sub in pending:
         text = f"ID: {sub['id']}\nОператор: {sub['operator']}\nЦена: {sub['price']}$\nНомер: {sub['phone']}\nВремя: {sub['submitted_at']}"
@@ -500,3 +499,55 @@ async def cmd_set_mode(message: Message):
         return
     await set_setting("sale_mode", args[1])
     await message.answer(f"Режим сдачи изменён на {'ХОЛД' if args[1]=='hold' else 'БХ'}")
+
+@router.callback_query(F.data == "admin_withdraw_requests")
+async def list_withdraw_requests(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        return
+    requests = await get_pending_withdraw_requests()
+    if not requests:
+        await callback.message.edit_text("Нет активных заявок на вывод.", reply_markup=admin_main_menu())
+        return
+    for req in requests:
+        user = await get_user(req['user_id'])
+        text = f"Заявка #{req['id']}\n👤 @{user['username']} (ID {user['user_id']})\n💰 {req['amount']}$\n🕒 {req['requested_at']}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Выплачено", callback_data=f"withdraw_paid:{req['id']}"),
+             InlineKeyboardButton(text="❌ Отклонить", callback_data=f"withdraw_reject:{req['id']}")]
+        ])
+        await callback.message.answer(text, reply_markup=kb)
+    await callback.message.delete()
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("withdraw_paid:"))
+async def withdraw_paid(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        return
+    req_id = int(callback.data.split(":")[1])
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT user_id, amount FROM withdraw_requests WHERE id = $1 AND status = 'pending'", req_id)
+        if not row:
+            await callback.answer("Заявка уже обработана", show_alert=True)
+            return
+        user_id = row['user_id']
+        amount = row['amount']
+        # Снимаем сумму с баланса (если не сняли ранее)
+        await conn.execute("UPDATE users SET crypto_balance = crypto_balance - $1 WHERE user_id = $2", amount, user_id)
+        await update_withdraw_request(req_id, 'paid', callback.from_user.id)
+    await callback.answer("Выплата отмечена")
+    await callback.message.delete()
+    await callback.message.answer(f"✅ Выплата по заявке #{req_id} подтверждена.")
+    # Уведомляем пользователя
+    user = await get_user(user_id)
+    if user:
+        await callback.bot.send_message(user_id, f"✅ Ваша заявка на вывод {amount}$ выполнена. Деньги отправлены вам.")
+
+@router.callback_query(F.data.startswith("withdraw_reject:"))
+async def withdraw_reject(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        return
+    req_id = int(callback.data.split(":")[1])
+    await update_withdraw_request(req_id, 'rejected', callback.from_user.id)
+    await callback.answer("Заявка отклонена")
+    await callback.message.delete()

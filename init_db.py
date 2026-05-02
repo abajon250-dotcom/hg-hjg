@@ -45,6 +45,18 @@ async def create_tables_and_data():
                 taken_at TIMESTAMP
             )
         """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS withdraw_requests (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                amount REAL,
+                status TEXT DEFAULT 'pending',  -- pending, paid, rejected
+                requested_at TIMESTAMP,
+                processed_at TIMESTAMP,
+                admin_id BIGINT
+            )
+        """)
         # Операторы
         await db.execute("""
             CREATE TABLE IF NOT EXISTS operators (
@@ -87,7 +99,17 @@ async def create_tables_and_data():
                 code TEXT PRIMARY KEY,
                 name TEXT
             )
-        """)
+            
+        CREATE TABLE IF NOT EXISTS withdraw_requests (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT,
+    amount REAL,
+    status TEXT DEFAULT 'pending',  -- pending, paid, rejected
+    requested_at TIMESTAMP,
+    processed_at TIMESTAMP,
+    admin_id BIGINT
+    )
+    """)
         # Индексы
         await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_user ON qr_submissions(user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_status ON qr_submissions(status)")

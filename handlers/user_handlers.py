@@ -189,7 +189,8 @@ async def receive_photo(message: Message, state: FSMContext):
                 await state.clear()
                 return
 
-    submission_id = await create_submission(user_id, operator, price, phone, photo_file_id, region)
+    mode = await get_setting("sale_mode", "hold")
+    submission_id = await create_submission(user_id, operator, price, phone, photo_file_id, region, mode)
     role = await get_user_role(user_id)
     await message.answer("✅ QR принят на проверку. Ожидайте решения админа.", reply_markup=main_menu(user_id in ADMIN_IDS, role == 'worker'))
     await state.clear()
@@ -202,6 +203,7 @@ async def receive_photo(message: Message, state: FSMContext):
         f"🆕 Новая сдача eSIM\n"
         f"👤 Пользователь: @{username} (ID {user_id})\n"
         f"📱 Оператор: {operator}\n"
+        f"⚙️ Режим: {mode_text}\n"
         f"💰 Стоимость: {price}$ + бонус {bonus}$\n"
         f"📞 Номер: {phone}\n"
         f"🕒 Время: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
@@ -385,7 +387,13 @@ async def show_my_numbers(callback: CallbackQuery):
     user_id = callback.from_user.id
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT DISTINCT phone FROM qr_submissions WHERE user_id = $1 ORDER BY submitted_at DESC", user_id)
+        # Используем DISTINCT ON, чтобы получить уникальные номера и последнюю дату (для сортировки)
+        rows = await conn.fetch("""
+            SELECT DISTINCT ON (phone) phone, submitted_at
+            FROM qr_submissions
+            WHERE user_id = $1
+            ORDER BY phone, submitted_at DESC
+        """, user_id)
     if not rows:
         await callback.answer("У вас нет сохранённых номеров.", show_alert=True)
         return
@@ -611,12 +619,12 @@ async def withdraw_cmd(message: Message):
     if user['crypto_balance'] < amount:
         await message.answer("❌ Недостаточно средств на крипто-балансе.")
         return
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE users SET crypto_balance = crypto_balance - $1 WHERE user_id = $2", amount, user_id)
+    # Создаём заявку
+    request_id = await create_withdraw_request(user_id, amount)
+    await message.answer(f"✅ Заявка на вывод #{request_id} на сумму {amount}$ создана. Ожидайте обработки администратором.")
+    # Уведомляем админов
     for admin in ADMIN_IDS:
-        await message.bot.send_message(admin, f"💰 Запрос вывода: @{message.from_user.username} (ID {user_id}) на сумму {amount}$")
-    await message.answer(f"✅ Запрос на вывод {amount}$ отправлен администратору.")
+        await message.bot.send_message(admin, f"💰 Новая заявка на вывод #{request_id}\n👤 @{message.from_user.username} (ID {user_id})\n💵 Сумма: {amount}$")
 
 @router.callback_query(F.data == "ref_system")
 async def ref_system_callback(callback: CallbackQuery):

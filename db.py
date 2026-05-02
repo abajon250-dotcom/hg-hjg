@@ -256,14 +256,14 @@ async def get_workers() -> List[Dict]:
 # ------------------------------------------------------------
 # Заявки
 # ------------------------------------------------------------
-async def create_submission(user_id: int, operator: str, price: float, phone: str, photo_file_id: str, region: str = None) -> int:
+async def create_submission(user_id: int, operator: str, price: float, phone: str, photo_file_id: str, region: str = None, mode: str = 'hold') -> int:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO qr_submissions (user_id, operator, price, phone, photo_file_id, submitted_at, status, region)
-            VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+            INSERT INTO qr_submissions (user_id, operator, price, phone, photo_file_id, submitted_at, status, region, mode)
+            VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)
             RETURNING id
-        """, user_id, operator, price, phone, photo_file_id, datetime.now(), region)
+        """, user_id, operator, price, phone, photo_file_id, datetime.now(), region, mode)
         return row['id']
 
 async def get_pending_submissions(limit: int = 20) -> List[Dict]:
@@ -545,3 +545,79 @@ async def get_new_users_count(days: int = 1) -> int:
             "SELECT COUNT(*) FROM users WHERE registered_at >= NOW() - make_interval(days => $1)",
             days
         ) or 0
+
+async def get_pending_submissions_by_mode(limit: int = 20, mode: str = None) -> List[Dict]:
+    """Если mode='hold' – возвращает заявки, созданные в режиме ХОЛД (price_hold), иначе БХ."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if mode == 'hold':
+            # Предполагаем, что цена в заявке соответствует price_hold оператора
+            # Проще: проверяем, равна ли цена оператора price_hold для этого оператора
+            # Но лучше добавить в таблицу qr_submissions колонку mode. Сделаем так:
+            rows = await conn.fetch("""
+                SELECT q.* FROM qr_submissions q
+                JOIN operators o ON q.operator = o.name
+                WHERE q.status = 'pending' AND q.price = o.price_hold
+                ORDER BY q.submitted_at DESC LIMIT $1
+            """, limit)
+        else:
+            rows = await conn.fetch("""
+                SELECT q.* FROM qr_submissions q
+                JOIN operators o ON q.operator = o.name
+                WHERE q.status = 'pending' AND q.price = o.price_bh
+                ORDER BY q.submitted_at DESC LIMIT $1
+            """, limit)
+        return [dict(row) for row in rows]
+
+async def create_withdraw_request(user_id: int, amount: float) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO withdraw_requests (user_id, amount, requested_at, status)
+            VALUES ($1, $2, NOW(), 'pending') RETURNING id
+        """, user_id, amount)
+        return row['id']
+
+async def get_pending_withdraw_requests() -> List[Dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM withdraw_requests WHERE status = 'pending' ORDER BY requested_at ASC")
+        return [dict(row) for row in rows]
+
+async def update_withdraw_request(request_id: int, status: str, admin_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE withdraw_requests SET status = $1, processed_at = NOW(), admin_id = $2 WHERE id = $3
+        """, status, admin_id, request_id)
+
+async def get_pending_submissions_by_mode(mode: str, limit: int = 20) -> List[Dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM qr_submissions WHERE status = 'pending' AND mode = $1 ORDER BY submitted_at DESC LIMIT $2",
+            mode, limit
+        )
+        return [dict(row) for row in rows]
+
+async def create_withdraw_request(user_id: int, amount: float) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO withdraw_requests (user_id, amount, requested_at, status)
+            VALUES ($1, $2, NOW(), 'pending') RETURNING id
+        """, user_id, amount)
+        return row['id']
+
+async def get_pending_withdraw_requests() -> List[Dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM withdraw_requests WHERE status = 'pending' ORDER BY requested_at ASC")
+        return [dict(row) for row in rows]
+
+async def update_withdraw_request(request_id: int, status: str, admin_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE withdraw_requests SET status = $1, processed_at = NOW(), admin_id = $2 WHERE id = $3
+        """, status, admin_id, request_id)

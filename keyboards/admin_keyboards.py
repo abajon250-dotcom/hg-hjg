@@ -10,6 +10,7 @@ def admin_main_menu():
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users_stats")],   # <-- новая кнопка
         [InlineKeyboardButton(text="💸 Выплаты", callback_data="admin_payouts")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="💰 Заявки на вывод", callback_data="admin_withdraw_requests")],
         [InlineKeyboardButton(text="🧹 Очистить все непроверенные", callback_data="admin_clear_pending")]
     ])
 

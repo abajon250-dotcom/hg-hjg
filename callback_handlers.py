@@ -12,19 +12,20 @@ from db import (
     accept_submission_now, mark_submission_failed, mark_submission_blocked,
     take_submission, get_user_role
 )
-from utils import calculate_rank   # <-- правильно
+from utils import calculate_rank   # <-- правильный импорт
 from keyboards.user_keyboards import main_menu, booking_menu, operators_for_booking
-from keyboards.admin_keyboards import work_actions, pending_actions
+from keyboards.admin_keyboards import work_actions
 
 router = Router()
 hold_tasks = {}
 
+# ---------- Таймер для холда ----------
 async def start_hold_timer(bot: Bot, submission_id: int, base_price: float, user_id: int, delay_seconds: float):
     await asyncio.sleep(delay_seconds)
     sub = await get_submission(submission_id)
     if sub and sub['status'] == 'hold':
         qr_count_30d, _ = await get_user_qr_last_30_days(user_id)
-        _, bonus = calculate_rank(qr_count_30d)
+        _, bonus = calculate_rank(qr_count_30d)   # здесь был calc_rank
         earned = base_price + bonus
         await accept_submission_from_hold(submission_id, earned)
         try:
@@ -34,7 +35,7 @@ async def start_hold_timer(bot: Bot, submission_id: int, base_price: float, user
     if submission_id in hold_tasks:
         del hold_tasks[submission_id]
 
-# ---------- Обработчик взятия заявки в работу ----------
+# ---------- Взятие заявки в работу ----------
 @router.callback_query(F.data.startswith("take_sub:"))
 async def take_submission_callback(callback: CallbackQuery, bot: Bot):
     worker_id = callback.from_user.id
@@ -52,13 +53,14 @@ async def take_submission_callback(callback: CallbackQuery, bot: Bot):
         await bot.send_message(sub['user_id'], "👨‍💻 Ваш номер взят в работу! Ожидайте решения.")
     except:
         pass
+    # Показываем кнопки работы над заявкой
     await callback.message.edit_caption(
         caption=f"🔄 Заявка #{submission_id} в работе у @{callback.from_user.username}\nОператор: {sub['operator']}\nНомер: {sub['phone']}",
         reply_markup=work_actions(submission_id)
     )
     await callback.answer()
 
-# ---------- Обработчик «Засчитать выплату» ----------
+# ---------- Засчитать выплату ----------
 @router.callback_query(F.data.startswith("pay_sub:"))
 async def pay_submission_callback(callback: CallbackQuery, bot: Bot):
     admin_id = callback.from_user.id
@@ -70,7 +72,7 @@ async def pay_submission_callback(callback: CallbackQuery, bot: Bot):
     mode = await get_setting("sale_mode", "hold")
     if mode == "bh":
         qr_count_30d, _ = await get_user_qr_last_30_days(sub['user_id'])
-        _, bonus = calc_rank(qr_count_30d)
+        _, bonus = calculate_rank(qr_count_30d)   # здесь тоже был calc_rank
         earned = sub['price'] + bonus
         await accept_submission_now(submission_id, admin_id, earned)
         await bot.send_message(sub['user_id'], f"✅ Ваш номер принят! Начислено {earned:.2f}$ (цена {sub['price']}$ + бонус {bonus}$).")
@@ -85,7 +87,7 @@ async def pay_submission_callback(callback: CallbackQuery, bot: Bot):
         await callback.message.edit_caption(caption=f"⏳ Заявка #{submission_id} в холде до {hold_until.strftime('%H:%M')} (админ @{callback.from_user.username})", reply_markup=None)
     await callback.answer()
 
-# ---------- Обработчик «Слетел» ----------
+# ---------- Слетел ----------
 @router.callback_query(F.data.startswith("fail_sub:"))
 async def fail_submission_callback(callback: CallbackQuery, bot: Bot):
     admin_id = callback.from_user.id
@@ -99,7 +101,7 @@ async def fail_submission_callback(callback: CallbackQuery, bot: Bot):
     await callback.message.edit_caption(caption=f"❌ Заявка #{submission_id} помечена как слетевшая (админ @{callback.from_user.username})", reply_markup=None)
     await callback.answer()
 
-# ---------- Обработчик «Блок» ----------
+# ---------- Блок ----------
 @router.callback_query(F.data.startswith("block_sub:"))
 async def block_submission_callback(callback: CallbackQuery, bot: Bot):
     admin_id = callback.from_user.id
@@ -113,7 +115,7 @@ async def block_submission_callback(callback: CallbackQuery, bot: Bot):
     await callback.message.edit_caption(caption=f"🚫 Заявка #{submission_id} заблокирована (админ @{callback.from_user.username})", reply_markup=None)
     await callback.answer()
 
-# ---------- Остальные callback'и (бронирование, редактирование и т.д.) ----------
+# ---------- Бронирование (callback'и, если они здесь) ----------
 @router.callback_query(F.data == "book_operator")
 async def book_operator_list(callback: CallbackQuery):
     operators = await get_operators()
@@ -140,16 +142,15 @@ async def create_booking_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
     existing = await get_active_booking(user_id)
     if existing:
-        await callback.answer("У вас уже есть активная бронь. Отмените её сначала.", show_alert=True)
+        await callback.answer("У вас уже есть активная бронь.", show_alert=True)
         return
     op_list = await get_operators()
     op_data = next((op for op in op_list if op['name'] == operator), None)
-    if op_data:
-        if op_data['slot_limit'] != -1:
-            used = await count_active_bookings_for_operator(operator)
-            if used >= op_data['slot_limit']:
-                await callback.answer("Все слоты заняты.", show_alert=True)
-                return
+    if op_data and op_data['slot_limit'] != -1:
+        used = await count_active_bookings_for_operator(operator)
+        if used >= op_data['slot_limit']:
+            await callback.answer("Все слоты заняты.", show_alert=True)
+            return
     await create_booking(user_id, operator)
     await callback.message.edit_text(f"✅ Вы забронировали {operator}. Бронь сгорит после сдачи eSIM.", reply_markup=booking_menu(True))
     await callback.answer()
