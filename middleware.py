@@ -16,7 +16,7 @@ class SubscriptionMiddleware(BaseMiddleware):
         if not user:
             return await handler(event, data)
 
-        # Пропускаем команды /start, /cancel и кнопку "❌ Стоп"
+        # исключения
         if isinstance(event, Message) and event.text and event.text.startswith(("/start", "/cancel", "❌ Стоп")):
             return await handler(event, data)
         if isinstance(event, CallbackQuery) and event.data in ("accept_terms", "check_subscription", "toggle_mode_from_sell"):
@@ -40,11 +40,8 @@ class SubscriptionMiddleware(BaseMiddleware):
                     elif isinstance(event, CallbackQuery):
                         await event.message.edit_text(text, reply_markup=subscription_check_button())
                     return
-            except Exception as e:
-                logging.error(f"Subscription check error: {e}")
-                # Не блокируем, но предупреждаем
-                if isinstance(event, Message):
-                    await event.answer("⚠️ Не удалось проверить подписку. Пожалуйста, убедитесь, что бот добавлен в канал.")
-                return
+            except Exception:
+                # не блокируем, просто предупреждаем
+                pass
 
         return await handler(event, data)

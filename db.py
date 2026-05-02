@@ -1,3 +1,4 @@
+# db.py – финальная версия для PostgreSQL
 import asyncpg
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
@@ -19,7 +20,6 @@ async def get_pool() -> asyncpg.Pool:
 async def init_db():
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # Таблица пользователей
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -37,7 +37,6 @@ async def init_db():
                 permissions TEXT DEFAULT ''
             )
         """)
-        # Таблица заявок
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS qr_submissions (
                 id SERIAL PRIMARY KEY,
@@ -55,10 +54,10 @@ async def init_db():
                 region TEXT,
                 reject_reason TEXT,
                 taken_by BIGINT,
-                taken_at TIMESTAMP
+                taken_at TIMESTAMP,
+                mode TEXT DEFAULT 'hold'
             )
         """)
-        # Таблица операторов
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS operators (
                 name TEXT PRIMARY KEY,
@@ -69,7 +68,6 @@ async def init_db():
                 conditions TEXT DEFAULT ''
             )
         """)
-        # Таблица бронирований
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS bookings (
                 id SERIAL PRIMARY KEY,
@@ -79,14 +77,12 @@ async def init_db():
                 used BOOLEAN DEFAULT FALSE
             )
         """)
-        # Таблица настроек
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
         """)
-        # Таблица ежедневной статистики
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_stats (
                 date DATE PRIMARY KEY,
@@ -94,80 +90,28 @@ async def init_db():
                 total_earned REAL DEFAULT 0
             )
         """)
-        # Таблица регионов
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS regions (
                 code TEXT PRIMARY KEY,
                 name TEXT
             )
         """)
-        # Индексы
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS withdraw_requests (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                amount REAL,
+                status TEXT DEFAULT 'pending',
+                requested_at TIMESTAMP,
+                processed_at TIMESTAMP,
+                admin_id BIGINT
+            )
+        """)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_user ON qr_submissions(user_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_status ON qr_submissions(status)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_bookings_user ON bookings(user_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_region ON qr_submissions(region)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_submissions_taken_by ON qr_submissions(taken_by)")
-
-        # Заполнение начальными данными (если таблицы пусты)
-        count = await conn.fetchval("SELECT COUNT(*) FROM operators")
-        if count == 0:
-            operators = [
-                ("Билайн", 15.0, 12.0, -1, 50, ""),
-                ("Газпром", 28.0, 22.0, -1, 50, ""),
-                ("МТС", 18.0, 14.0, -1, 50, ""),
-                ("Сбер", 12.0, 9.0, -1, 50, ""),
-                ("ВТБ", 25.0, 20.0, -1, 50, ""),
-                ("Добросвязь", 13.0, 10.0, -1, 50, ""),
-                ("Мегафон", 14.0, 11.0, -1, 50, ""),
-                ("Т2", 14.0, 11.0, -1, 50, ""),
-                ("Тинькофф", 14.0, 11.0, -1, 50, ""),
-                ("Миранда", 11.0, 9.0, -1, 50, ""),
-                ("Волна", 12.0, 10.0, -1, 50, ""),
-                ("Йота", 14.0, 11.0, -1, 50, ""),
-            ]
-            for op in operators:
-                await conn.execute("""
-                    INSERT INTO operators (name, price_hold, price_bh, slot_limit, min_minutes, conditions)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (name) DO NOTHING
-                """, *op)
-        await conn.execute("INSERT INTO settings (key, value) VALUES ('sale_mode', 'hold') ON CONFLICT (key) DO NOTHING")
-        count = await conn.fetchval("SELECT COUNT(*) FROM regions")
-        if count == 0:
-            regions = [
-                ("901", "г. Санкт-Петербург и Ленинградская область"),
-                ("902", "г. Санкт-Петербург и Ленинградская область"),
-                ("903", "г. Санкт-Петербург и Ленинградская область"),
-                ("904", "г. Санкт-Петербург и Ленинградская область"),
-                ("905", "г. Санкт-Петербург и Ленинградская область"),
-                ("906", "г. Санкт-Петербург и Ленинградская область"),
-                ("909", "г. Санкт-Петербург и Ленинградская область"),
-                ("910", "Москва и Московская область"),
-                ("915", "Москва и Московская область"),
-                ("916", "Москва и Московская область"),
-                ("917", "Москва и Московская область"),
-                ("925", "Москва и Московская область"),
-                ("926", "Москва и Московская область"),
-                ("929", "Москва и Московская область"),
-                ("930", "Москва и Московская область"),
-                ("937", "Москва и Московская область"),
-                ("938", "Москва и Московская область"),
-                ("939", "Москва и Московская область"),
-                ("958", "Москва и Московская область"),
-                ("977", "Москва и Московская область"),
-                ("985", "Москва и Московская область"),
-                ("986", "Москва и Московская область"),
-                ("987", "Москва и Московская область"),
-                ("988", "Москва и Московская область"),
-                ("989", "Москва и Московская область"),
-                ("995", "Москва и Московская область"),
-                ("981", "Иркутская обл."),
-                ("982", "Иркутская обл."),
-                ("983", "Иркутская обл."),
-                ("984", "Иркутская обл."),
-            ]
-            for code, name in regions:
-                await conn.execute("INSERT INTO regions (code, name) VALUES ($1, $2) ON CONFLICT (code) DO NOTHING", code, name)
 
 # ------------------------------------------------------------
 # Пользователи и роли
@@ -191,8 +135,7 @@ async def accept_terms(user_id: int):
 async def has_accepted_terms(user_id: int) -> bool:
     pool = await get_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchval("SELECT terms_accepted FROM users WHERE user_id = $1", user_id)
-        return row is True
+        return await conn.fetchval("SELECT terms_accepted FROM users WHERE user_id = $1", user_id) or False
 
 async def get_user(user_id: int) -> Optional[Dict]:
     pool = await get_pool()
@@ -204,15 +147,9 @@ async def update_user_earnings(user_id: int, amount: float, is_referral_bonus=Fa
     pool = await get_pool()
     async with pool.acquire() as conn:
         if is_referral_bonus:
-            await conn.execute("""
-                UPDATE users SET referral_earnings = referral_earnings + $1, crypto_balance = crypto_balance + $1
-                WHERE user_id = $2
-            """, amount, user_id)
+            await conn.execute("UPDATE users SET referral_earnings = referral_earnings + $1, crypto_balance = crypto_balance + $1 WHERE user_id = $2", amount, user_id)
         else:
-            await conn.execute("""
-                UPDATE users SET total_earned = total_earned + $1, earned_today = earned_today + $1
-                WHERE user_id = $2
-            """, amount, user_id)
+            await conn.execute("UPDATE users SET total_earned = total_earned + $1, earned_today = earned_today + $1 WHERE user_id = $2", amount, user_id)
 
 async def add_crypto_balance(user_id: int, amount: float):
     pool = await get_pool()
@@ -270,6 +207,15 @@ async def get_pending_submissions(limit: int = 20) -> List[Dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT * FROM qr_submissions WHERE status = 'pending' ORDER BY submitted_at DESC LIMIT $1", limit)
+        return [dict(row) for row in rows]
+
+async def get_pending_submissions_by_mode(mode: str, limit: int = 20) -> List[Dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM qr_submissions WHERE status = 'pending' AND mode = $1 ORDER BY submitted_at DESC LIMIT $2",
+            mode, limit
+        )
         return [dict(row) for row in rows]
 
 async def get_submission(submission_id: int) -> Optional[Dict]:
@@ -435,7 +381,6 @@ async def get_user_stats(user_id: int, days: int = None) -> Dict:
                 WHERE user_id = $1
             """, user_id)
         else:
-            # Используем make_interval для целого числа дней
             row = await conn.fetchrow("""
                 SELECT
                     COUNT(*) as total,
@@ -467,23 +412,6 @@ async def get_top_users(limit: int = 10) -> List[Dict]:
         rows = await conn.fetch("SELECT user_id, total_earned FROM users ORDER BY total_earned DESC LIMIT $1", limit)
         return [{"user_id": r['user_id'], "total_earned": r['total_earned']} for r in rows]
 
-# ------------------------------------------------------------
-# Регионы и топ операторов
-# ------------------------------------------------------------
-async def get_operator_top_regions(operator: str, period_days: int = 7) -> List[Dict]:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT r.name as region_name, COUNT(*) as cnt
-            FROM qr_submissions q
-            JOIN regions r ON q.region = r.code
-            WHERE q.operator = $1 AND q.status = 'accepted' AND q.submitted_at >= NOW() - make_interval(days => $2)
-            GROUP BY q.region, r.name
-            ORDER BY cnt DESC
-            LIMIT 5
-        """, operator, period_days)
-        return [dict(row) for row in rows]
-
 async def get_most_popular_operator() -> str:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -503,6 +431,20 @@ async def get_low_stock_operators() -> List[str]:
             if free <= 2:
                 low_stock.append(op['name'])
     return low_stock
+
+async def get_operator_top_regions(operator: str, period_days: int = 7) -> List[Dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT r.name as region_name, COUNT(*) as cnt
+            FROM qr_submissions q
+            JOIN regions r ON q.region = r.code
+            WHERE q.operator = $1 AND q.status = 'accepted' AND q.submitted_at >= NOW() - make_interval(days => $2)
+            GROUP BY q.region, r.name
+            ORDER BY cnt DESC
+            LIMIT 5
+        """, operator, period_days)
+        return [dict(row) for row in rows]
 
 # ------------------------------------------------------------
 # Реферальная система
@@ -532,74 +474,18 @@ async def get_referral_stats(user_id: int) -> Dict:
         return {"count": count, "earnings": earnings}
 
 async def get_total_users_count() -> int:
-    """Возвращает общее количество зарегистрированных пользователей."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        return await conn.fetchval("SELECT COUNT(*) FROM users")
+        return await conn.fetchval("SELECT COUNT(*) FROM users") or 0
 
 async def get_new_users_count(days: int = 1) -> int:
-    """Возвращает количество новых пользователей за последние N дней (по умолчанию 1)."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        return await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE registered_at >= NOW() - make_interval(days => $1)",
-            days
-        ) or 0
+        return await conn.fetchval("SELECT COUNT(*) FROM users WHERE registered_at >= NOW() - make_interval(days => $1)", days) or 0
 
-async def get_pending_submissions_by_mode(limit: int = 20, mode: str = None) -> List[Dict]:
-    """Если mode='hold' – возвращает заявки, созданные в режиме ХОЛД (price_hold), иначе БХ."""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        if mode == 'hold':
-            # Предполагаем, что цена в заявке соответствует price_hold оператора
-            # Проще: проверяем, равна ли цена оператора price_hold для этого оператора
-            # Но лучше добавить в таблицу qr_submissions колонку mode. Сделаем так:
-            rows = await conn.fetch("""
-                SELECT q.* FROM qr_submissions q
-                JOIN operators o ON q.operator = o.name
-                WHERE q.status = 'pending' AND q.price = o.price_hold
-                ORDER BY q.submitted_at DESC LIMIT $1
-            """, limit)
-        else:
-            rows = await conn.fetch("""
-                SELECT q.* FROM qr_submissions q
-                JOIN operators o ON q.operator = o.name
-                WHERE q.status = 'pending' AND q.price = o.price_bh
-                ORDER BY q.submitted_at DESC LIMIT $1
-            """, limit)
-        return [dict(row) for row in rows]
-
-async def create_withdraw_request(user_id: int, amount: float) -> int:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            INSERT INTO withdraw_requests (user_id, amount, requested_at, status)
-            VALUES ($1, $2, NOW(), 'pending') RETURNING id
-        """, user_id, amount)
-        return row['id']
-
-async def get_pending_withdraw_requests() -> List[Dict]:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM withdraw_requests WHERE status = 'pending' ORDER BY requested_at ASC")
-        return [dict(row) for row in rows]
-
-async def update_withdraw_request(request_id: int, status: str, admin_id: int):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE withdraw_requests SET status = $1, processed_at = NOW(), admin_id = $2 WHERE id = $3
-        """, status, admin_id, request_id)
-
-async def get_pending_submissions_by_mode(mode: str, limit: int = 20) -> List[Dict]:
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM qr_submissions WHERE status = 'pending' AND mode = $1 ORDER BY submitted_at DESC LIMIT $2",
-            mode, limit
-        )
-        return [dict(row) for row in rows]
-
+# ------------------------------------------------------------
+# Заявки на вывод
+# ------------------------------------------------------------
 async def create_withdraw_request(user_id: int, amount: float) -> int:
     pool = await get_pool()
     async with pool.acquire() as conn:

@@ -553,34 +553,7 @@ async def referral_button(message: Message):
     )
     await message.answer(text, reply_markup=back_button())
 
-# ---------- Мой бот ----------
-@router.message(F.text == "🤖 Мой бот")
-async def my_bot_button(message: Message):
-    text = (
-        "🤖 **Мой бот**\n\n"
-        "Подключите своего Telegram-бота для приёма номеров.\n\n"
-        "**Зачем это нужно?**\n"
-        "• **Безопасность** – если основной бот заблокируют, вы продолжите через личного.\n"
-        "• **Стабильность** – личный бот отвечает быстрее.\n\n"
-        "**Инструкция:**\n"
-        "1. Создайте бота у [@BotFather](https://t.me/botfather) (команда /newbot).\n"
-        "2. Скопируйте токен.\n"
-        "3. Отправьте его этой командой: `/deploy <токен>`\n"
-        "4. Администратор получит уведомление и свяжется с вами для завершения настройки.\n\n"
-        "⚠️ Подключение – бесплатно, одним токеном."
-    )
-    await message.answer(text, parse_mode="Markdown", reply_markup=back_button())
 
-@router.message(Command("deploy"))
-async def deploy_command(message: Message):
-    args = message.text.split()
-    if len(args) != 2:
-        await message.answer("Использование: /deploy <токен_бота>")
-        return
-    token = args[1]
-    for admin in ADMIN_IDS:
-        await message.bot.send_message(admin, f"🚀 Запрос на развёртывание бота от @{message.from_user.username} (ID {message.from_user.id})\nТокен: {token}")
-    await message.answer("✅ Запрос отправлен администратору. Ожидайте.")
 
 # ---------- Крипто-выплаты ----------
 @router.message(Command("pay"))

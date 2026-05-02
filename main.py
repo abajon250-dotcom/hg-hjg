@@ -3,7 +3,6 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from datetime import datetime
 
 from config import BOT_TOKEN
 from db import init_db_pool, init_db, get_hold_submissions
@@ -27,15 +26,13 @@ async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
-    # Инициализация пула и таблиц
+    # инициализация базы данных
     await init_db_pool()
-    await init_db()
+    await init_db()  # создаст таблицы, если их нет
 
-    # Мидлвари
     dp.message.middleware(SubscriptionMiddleware())
     dp.callback_query.middleware(SubscriptionMiddleware())
 
-    # Роутеры
     dp.include_router(user_handlers.router)
     dp.include_router(admin_handlers.router)
     dp.include_router(callback_handlers.router)
