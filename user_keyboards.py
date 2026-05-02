@@ -4,8 +4,7 @@ def main_menu(is_admin: bool = False, is_worker: bool = False):
     buttons = [
         [KeyboardButton(text="📱 Сдать ESIM")],
         [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="📅 Бронирование")],
-        [KeyboardButton(text="🎁 Бонусы"), KeyboardButton(text="👥 Рефералы")],
-        [KeyboardButton(text="🤖 Мой бот")]
+        [KeyboardButton(text="🎁 Бонусы"), KeyboardButton(text="👥 Рефералы")]
     ]
     if is_worker or is_admin:
         buttons.append([KeyboardButton(text="📋 Мои заявки")])
@@ -29,7 +28,8 @@ def profile_keyboard():
         [InlineKeyboardButton(text="📚 Полезное", callback_data="useful")],
         [InlineKeyboardButton(text="📞 Мои номера", callback_data="my_numbers"),
          InlineKeyboardButton(text="👥 Рефералы", callback_data="ref_system")],
-        [InlineKeyboardButton(text="📜 История сдач", callback_data="history")]
+        [InlineKeyboardButton(text="💸 Вывести баланс", callback_data="withdraw_balance"),
+         InlineKeyboardButton(text="📜 История сдач", callback_data="history")]
     ])
 
 def booking_menu(has_booking: bool):

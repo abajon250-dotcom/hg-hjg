@@ -7,16 +7,16 @@ def admin_main_menu():
         [InlineKeyboardButton(text="🔄 Переключить режим сдачи", callback_data="admin_toggle_mode")],
         [InlineKeyboardButton(text="🎫 Управление слотами брони", callback_data="admin_slots")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users_stats")],   # <-- новая кнопка
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users_stats")],
         [InlineKeyboardButton(text="💸 Выплаты", callback_data="admin_payouts")],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="💰 Заявки на вывод", callback_data="admin_withdraw_requests")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="🧹 Очистить все непроверенные", callback_data="admin_clear_pending")]
     ])
 
 def pending_actions(submission_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👨‍💻 Взять в работу", callback_data=f"take_sub:{submission_id}")]
+        [InlineKeyboardButton(text="👨‍💻 Взять в работу", callback_data=f"take_sub:{submission_id}")]
     ])
 
 def work_actions(submission_id: int):
