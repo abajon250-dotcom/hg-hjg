@@ -3,6 +3,8 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from datetime import datetime, time
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import BOT_TOKEN
 from db import init_db_pool, init_db, get_hold_submissions
@@ -12,6 +14,7 @@ import admin_handlers
 import callback_handlers
 from middleware import SubscriptionMiddleware
 from callback_handlers import start_hold_timer
+from daily_summary import send_daily_summary   # новый файл (см. ниже)
 
 async def restore_holds(bot: Bot):
     submissions = await get_hold_submissions()
@@ -21,14 +24,19 @@ async def restore_holds(bot: Bot):
         if delay > 0:
             asyncio.create_task(start_hold_timer(bot, sub['id'], sub['price'], sub['user_id'], delay))
 
+async def schedule_daily_summary(bot: Bot, reset_daily_earnings=None):
+    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+    scheduler.add_job(send_daily_summary, "cron", hour=18, minute=0, args=[bot])
+    scheduler.add_job(reset_daily_earnings, "cron", hour=0, minute=0)
+    scheduler.start()
+
 async def main():
     logging.basicConfig(level=logging.INFO)
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
-    # инициализация базы данных
     await init_db_pool()
-    await init_db()  # создаст таблицы, если их нет
+    await init_db()
 
     dp.message.middleware(SubscriptionMiddleware())
     dp.callback_query.middleware(SubscriptionMiddleware())
@@ -39,6 +47,7 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
     await restore_holds(bot)
+    await schedule_daily_summary(bot)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

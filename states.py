@@ -14,3 +14,6 @@ class BroadcastState(StatesGroup):
 
 class WithdrawState(StatesGroup):
     waiting_for_amount = State()
+
+class CryptoCheckState(StatesGroup):
+    waiting_for_check = State()

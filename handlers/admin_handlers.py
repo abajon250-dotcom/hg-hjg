@@ -369,27 +369,48 @@ async def list_withdraw_requests(callback: CallbackQuery):
     await callback.message.delete()
     await callback.answer()
 
+from states import CryptoCheckState
+
+# ... остальной код
+
 @router.callback_query(F.data.startswith("withdraw_paid:"))
-async def withdraw_paid(callback: CallbackQuery):
+async def ask_crypto_check(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
         return
     req_id = int(callback.data.split(":")[1])
+    await state.update_data(withdraw_request_id=req_id)
+    await state.set_state(CryptoCheckState.waiting_for_check)
+    await callback.message.answer("🔗 Введите крипто-чек (ссылку на транзакцию или платёж):")
+    await callback.answer()
+
+@router.message(CryptoCheckState.waiting_for_check)
+async def process_crypto_check(message: Message, state: FSMContext, bot: Bot):
+    if not await is_admin(message.from_user.id):
+        return
+    check_link = message.text.strip()
+    data = await state.get_data()
+    req_id = data['withdraw_request_id']
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT user_id, amount FROM withdraw_requests WHERE id = $1 AND status = 'pending'", req_id)
         if not row:
-            await callback.answer("Заявка уже обработана", show_alert=True)
+            await message.answer("❌ Заявка уже обработана.")
+            await state.clear()
             return
         user_id = row['user_id']
         amount = row['amount']
-        await conn.execute("UPDATE users SET crypto_balance = crypto_balance - $1 WHERE user_id = $2", amount, user_id)
-        await update_withdraw_request(req_id, 'paid', callback.from_user.id)
-    await callback.answer("Выплата отмечена")
-    await callback.message.delete()
-    await callback.message.answer(f"✅ Выплата по заявке #{req_id} подтверждена.")
+        # Списываем с earned_today
+        await conn.execute("UPDATE users SET earned_today = earned_today - $1 WHERE user_id = $2", amount, user_id)
+        await update_withdraw_request(req_id, 'paid', message.from_user.id)
+    # Отправляем пользователю крипто-чек
     user = await get_user(user_id)
     if user:
-        await callback.bot.send_message(user_id, f"✅ Ваша заявка на вывод {amount}$ выполнена. Деньги отправлены вам.")
+        try:
+            await bot.send_message(user_id, f"✅ Вам выплачено {amount}$.\n🔗 Чек: {check_link}")
+        except:
+            pass
+    await message.answer(f"✅ Выплата по заявке #{req_id} подтверждена. Чек отправлен пользователю.")
+    await state.clear()
 
 @router.callback_query(F.data.startswith("withdraw_reject:"))
 async def withdraw_reject(callback: CallbackQuery):
