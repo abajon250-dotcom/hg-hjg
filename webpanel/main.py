@@ -268,3 +268,6 @@ async def subscriptions_page(request: Request, admin_id: int = Depends(get_curre
 async def subscription_update(user_id: int = Form(...), plan: str = Form(...), status: str = Form(...), end_date: str = Form(...), auto_renew: bool = Form(False), admin_id: int = Depends(get_current_admin)):
     await update_subscription(user_id, plan, status, end_date, auto_renew)
     return RedirectResponse(url="/subscriptions", status_code=302)
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
